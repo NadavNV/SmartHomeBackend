@@ -37,7 +37,7 @@ def validate_device_data(new_device):
 
 
 # Checks the validity of the device id
-def check_id(device_id):
+def id_exists(device_id):
     for device in data:
         if device_id == device["id"]:
             return True
@@ -55,6 +55,17 @@ app.config['MQTT_TLS_ENABLED'] = False  # set TLS to disabled for testing purpos
 mqtt = Mqtt(app)
 
 
+# Formats and publishes the mqtt topic and payload -> the mqtt publisher
+def publish_mqtt(contents: dict, room: str, device_id: str, method: str):
+    room_topic = room.lower().replace(" ", "-")
+    topic = f"project/home/{room_topic}/{device_id}/{method}"
+    payload = json.dumps({
+        "sender": "backend",
+        "contents": contents,
+    })
+    mqtt.publish(topic, payload.encode(), qos=2)
+
+
 # Function to run after the MQTT client finishes connecting to the broker
 @mqtt.on_connect()
 def on_connect(client, userdata, flags, rc):
@@ -68,35 +79,65 @@ def on_message(client, userdata, msg):
     try:
         payload = json.loads(msg.payload.decode())
         app.logger.info(f"Payload: {payload}")
+        # Ignore self messages
+        if "sender" in payload:
+            if payload["sender"] == "backend":
+                app.logger.info("Ignoring self message")
+                return
+            else:
+                payload = payload["contents"]
+        else:
+            app.logger.error("Payload missing sender")
+            return
 
-        # Extract device_id from topic: expected format project/home/<room>/<device_id>/action
-        device_name = None
+        # Extract device_id from topic: expected format project/home/<room>/<device_id>/<method>
         topic_parts = msg.topic.split('/')
         if len(topic_parts) >= 5:
             device_id = topic_parts[3]
-            if "id" in payload and device_id != payload["id"]:
-                app.logger.error(f"ID mismatch - ID in payload: {payload["id"]}, ID in topic: {device_id}")
-                return
-            for device in data:
-                if device['id'] == device_id:
-                    for key, value in payload.items():
-                        if key == "id":
-                            continue
-                        elif key == "parameters":
-                            for param_key, param_value in payload["parameters"].items():
-                                app.logger.info(f"Setting parameter '{param_key}' to value '{param_value}'")
-                                device['parameters'][param_key] = param_value
-                        else:
-                            app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-                            device[key] = value
-                    device_name = device["name"]
+            method = topic_parts[-1]
+            match method:
+                case "action":
+                    for device in data:
+                        if device['id'] == device_id:
+                            for key, value in payload.items():
+                                app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+                                device["parameters"][key] = value
+                            return
+                    app.logger.error(f"Device ID {device_id} not found")
+                case "update":
+                    for device in data:
+                        if device['id'] == device_id:
+                            for key, value in payload.items():
+                                app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+                                device[key] = value
+                            return
+                    app.logger.error(f"Device ID {device_id} not found")
+                case "post":
+                    if validate_device_data(payload):
+                        if id_exists(payload["id"]):
+                            app.logger.error("ID already exists")
+                            return
+                        data.append(payload)
+                        app.logger.info("Device added successfully")
+                        return
+                    app.logger.error("Missing required field")
                     return
-            app.logger.error(f"Device ID {device_id} not found")
-
-        # print_device_action(
-        #     device_name="Unknown device" if device_name is None else device_name,
-        #     action_payload=payload
-        # )
+                case "delete":
+                    index_to_delete = None
+                    if id_exists(device_id):
+                        for index, device in enumerate(data):
+                            if device["id"] == device_id:
+                                index_to_delete = index
+                        if index_to_delete is not None:
+                            data.pop(index_to_delete)
+                            app.logger.info("Device deleted successfully")
+                            return
+                    app.logger.error("ID not found")
+                    return
+                case _:
+                    app.logger.error(f"Unknown method: {method}")
+        else:
+            app.logger.error(f"Incorrect topic {msg.topic}")
 
     except UnicodeError as e:
         app.logger.exception(f"Error decoding payload: {e.reason}")
@@ -128,23 +169,26 @@ def get_device(device_id):
 def add_device():
     new_device = request.json
     if validate_device_data(new_device):
-        if check_id(new_device["id"]):
+        if id_exists(new_device["id"]):
             return jsonify({'error': "ID already exists"}), 400
         data.append(new_device)
-
-        return jsonify({'output': "device added successfully"}), 200
+        publish_mqtt(new_device, new_device['room'], new_device['id'], "post")
+        return jsonify({'output': "Device added successfully"}), 200
     return jsonify({'error': 'Missing required field'}), 400
 
 
 # Deletes a device from the device list
 @app.delete("/api/devices/<device_id>")
 def delete_device(device_id):
-    if check_id(device_id):
+    index_to_delete = None
+    if id_exists(device_id):
         for index, device in enumerate(data):
             if device["id"] == device_id:
                 index_to_delete = index
-        data.pop(index_to_delete)
-        return jsonify({"output": "device was deleted from the database"}), 200
+        if index_to_delete is not None:
+            device = data.pop(index_to_delete)
+            publish_mqtt({}, device['room'], device_id, "delete")
+            return jsonify({"output": "device was deleted from the database"}), 200
     return jsonify({"error": "id not found"}), 404
 
 
@@ -158,6 +202,7 @@ def update_device(device_id):
             for key, value in updated_device.items():
                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
                 data[i][key] = updated_device[key]
+            publish_mqtt(updated_device, data[i]['room'], device_id, "update")
             return jsonify({'output': "Device updated successfully"}), 200
     return jsonify({'error': "Device not found"}), 404
 
@@ -174,15 +219,9 @@ def rt_action(device_id):
             for key, value in action.items():
                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
                 device["parameters"][key] = value
-
-            # Formats and publishes the mqtt topic and payload -> the mqtt publisher
-            room_topic = device['room'].lower().replace(" ", "-")
-            topic = f"project/home/{room_topic}/{device['id']}/action"
-            payload = json.dumps(action)
-            mqtt.publish(topic, payload.encode(), qos=2)
-
+            publish_mqtt(action, device['room'], device_id, "action")
             return jsonify({'output': "Action applied to device and published via MQTT"}), 200
-    return jsonify({'error': "Device not found"}), 404
+    return jsonify({'error': "ID not found"}), 404
 
 
 # Adds required headers to the response
