@@ -8,6 +8,7 @@
       "parameters": {
         "temperature": 40,
         "target_temperature": 55,
+        "is_heating": true,
         "timer_enabled": true,
         "scheduled_on": "06:30",
         "scheduled_off": "08:00"
