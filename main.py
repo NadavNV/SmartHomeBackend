@@ -56,9 +56,8 @@ mqtt = Mqtt(app)
 
 
 # Formats and publishes the mqtt topic and payload -> the mqtt publisher
-def publish_mqtt(contents: dict, room: str, device_id: str, method: str):
-    room_topic = room.lower().replace(" ", "-")
-    topic = f"project/home/{room_topic}/{device_id}/{method}"
+def publish_mqtt(contents: dict, device_id: str, method: str):
+    topic = f"project/home/{device_id}/{method}"
     payload = json.dumps({
         "sender": "backend",
         "contents": contents,
@@ -90,10 +89,10 @@ def on_message(client, userdata, msg):
             app.logger.error("Payload missing sender")
             return
 
-        # Extract device_id from topic: expected format project/home/<room>/<device_id>/<method>
+        # Extract device_id from topic: expected format project/home/<device_id>/<method>
         topic_parts = msg.topic.split('/')
-        if len(topic_parts) >= 5:
-            device_id = topic_parts[3]
+        if len(topic_parts) >= 4:
+            device_id = topic_parts[2]
             method = topic_parts[-1]
             match method:
                 case "action":
@@ -172,7 +171,11 @@ def add_device():
         if id_exists(new_device["id"]):
             return jsonify({'error': "ID already exists"}), 400
         data.append(new_device)
-        publish_mqtt(new_device, new_device['room'], new_device['id'], "post")
+        publish_mqtt(
+            contents=new_device,
+            device_id=new_device['id'],
+            method="post",
+        )
         return jsonify({'output': "Device added successfully"}), 200
     return jsonify({'error': 'Missing required field'}), 400
 
@@ -186,10 +189,14 @@ def delete_device(device_id):
             if device["id"] == device_id:
                 index_to_delete = index
         if index_to_delete is not None:
-            device = data.pop(index_to_delete)
-            publish_mqtt({}, device['room'], device_id, "delete")
-            return jsonify({"output": "device was deleted from the database"}), 200
-    return jsonify({"error": "id not found"}), 404
+            data.pop(index_to_delete)
+            publish_mqtt(
+                contents={},
+                device_id=device_id,
+                method="delete",
+            )
+            return jsonify({"output": "Device was deleted from the database"}), 200
+    return jsonify({"error": "ID not found"}), 404
 
 
 # Changes a device configuration or adds a new configuration
@@ -202,7 +209,11 @@ def update_device(device_id):
             for key, value in updated_device.items():
                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
                 data[i][key] = updated_device[key]
-            publish_mqtt(updated_device, data[i]['room'], device_id, "update")
+            publish_mqtt(
+                contents=updated_device,
+                device_id=device_id,
+                method="update",
+            )
             return jsonify({'output': "Device updated successfully"}), 200
     return jsonify({'error': "Device not found"}), 404
 
@@ -219,7 +230,11 @@ def rt_action(device_id):
             for key, value in action.items():
                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
                 device["parameters"][key] = value
-            publish_mqtt(action, device['room'], device_id, "action")
+            publish_mqtt(
+                contents=action,
+                device_id=device_id,
+                method="action",
+            )
             return jsonify({'output': "Action applied to device and published via MQTT"}), 200
     return jsonify({'error': "ID not found"}), 404
 
@@ -247,7 +262,8 @@ atexit.register(on_shutdown)
 # PUT /api/devices/<device_id>: Update a device's configuration or status (e.g., turn on/off).
 # DELETE /api/devices/<device_id>: Remove a smart device.
 # Real-Time Actions:
-# POST /api/devices/<device_id>/action: Send a command to a device (requires action and optional parameters in JSON payload).
+# POST /api/devices/<device_id>/action: Send a command to a device (requires action and
+#       optional parameters in JSON payload).
 # Device Analytics:
 # GET /api/devices/analytics: Fetch usage patterns and status trends for devices.
 
