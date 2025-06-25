@@ -1,11 +1,11 @@
-FROM python:3.14.0b3-alpine
+FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY SmartHomeBackend/requirements.txt .
 
 RUN pip install -r requirements.txt
 
-COPY main.py .
+COPY SmartHomeBackend/ .
 
-CMD ["python", "main.py"]
+CMD ["python3", "main.py"]
