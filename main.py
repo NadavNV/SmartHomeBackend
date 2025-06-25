@@ -7,7 +7,6 @@ from pymongo.server_api import ServerApi
 from dotenv import load_dotenv
 import os
 
-
 # Env variables
 load_dotenv()
 
@@ -21,23 +20,9 @@ client = MongoClient(uri, server_api=ServerApi('1'))
 db = client["smart_home"]
 devices_collection = db["devices"]
 
-
 # Setting up the MQTT client
 BROKER_URL = "test.mosquitto.org"
 BROKER_PORT = 1883  # MQTT, unencrypted, unauthenticated
-
-
-# Prints out an output of the received mqtt messages
-def print_device_action(device_name, action_payload, prefix=""):
-    for key, value in action_payload.items():
-        if isinstance(value, dict):
-            # Special case: skip printing "parameters" as a word in output
-            if key == "parameters":
-                print_device_action(device_name, value, prefix=prefix)
-            else:
-                print_device_action(device_name, value, prefix=f"{prefix}{key} ")
-        else:
-            app.logger.info(f"{device_name} {prefix}{key} set to {value}")
 
 
 # Validates that the request data contains all the required fields
@@ -81,11 +66,11 @@ def publish_mqtt(contents: dict, device_id: str, method: str):
 
 # Function to run after the MQTT client finishes connecting to the broker
 @mqtt.on_connect()
-def on_connect(client, userdata, flags, rc):
-    client.subscribe("project/home/#")
+def on_connect(mqtt_client, userdata, flags, rc):
+    mqtt_client.subscribe("project/home/#")
 
 
-## Receives the published mqtt payloads -> the mqtt subscriber
+## Receives the published mqtt payloads and updates the database accordingly
 # @mqtt.on_message()
 # def on_message(client, userdata, msg):
 #     app.logger.info(f"MQTT Message Received on {msg.topic}")
@@ -158,10 +143,9 @@ def on_connect(client, userdata, flags, rc):
 
 # Returns a list of device IDs
 @app.get("/api/ids")
-def device_ids():
-    device_ids = list(devices_collection.find({}, {'id': 1 , '_id': 0}))
+def get_device_ids():
+    device_ids = list(devices_collection.find({}, {'id': 1, '_id': 0}))
     return [device_id['id'] for device_id in device_ids]
-
 
 
 # Presents a list of all your devices and their configuration
@@ -189,7 +173,7 @@ def add_device():
         if id_exists(new_device["id"]):
             return jsonify({'error': "ID already exists"}), 400
         devices_collection.insert_one(new_device)
-        # Remove MongoDB uniqe id (_id) before publishing to mqtt
+        # Remove MongoDB unique id (_id) before publishing to mqtt
         new_device.pop("_id", None)
         publish_mqtt(
             contents=new_device,
@@ -225,8 +209,8 @@ def update_device(device_id):
             app.logger.info(f"Setting parameter '{key}' to value '{value}'")
             # Find device by id and update the fields with 'set'
             devices_collection.update_one(
-            {"id": device_id},
-            {"$set": updated_device}
+                {"id": device_id},
+                {"$set": updated_device}
             )
         publish_mqtt(
             contents=updated_device,
