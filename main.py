@@ -85,76 +85,83 @@ def on_connect(client, userdata, flags, rc):
     client.subscribe("project/home/#")
 
 
-## Receives the published mqtt payloads -> the mqtt subscriber
-# @mqtt.on_message()
-# def on_message(client, userdata, msg):
-#     app.logger.info(f"MQTT Message Received on {msg.topic}")
-#     try:
-#         payload = json.loads(msg.payload.decode())
-#         app.logger.info(f"Payload: {payload}")
-#         # Ignore self messages
-#         if "sender" in payload:
-#             if payload["sender"] == "backend":
-#                 app.logger.info("Ignoring self message")
-#                 return
-#             else:
-#                 payload = payload["contents"]
-#         else:
-#             app.logger.error("Payload missing sender")
-#             return
+# Receives the published mqtt payloads -> the mqtt subscriber
+@mqtt.on_message()
+def on_message(client, userdata, msg):
+    app.logger.info(f"MQTT Message Received on {msg.topic}")
+    try:
+        payload = json.loads(msg.payload.decode())
+        app.logger.info(f"Payload: {payload}")
+        # Ignore self messages
+        if "sender" in payload:
+            if payload["sender"] == "backend":
+                app.logger.info("Ignoring self message")
+                return
+            else:
+                payload = payload["contents"]
+        else:
+            app.logger.error("Payload missing sender")
+            return
 
-#         # Extract device_id from topic: expected format project/home/<device_id>/<method>
-#         topic_parts = msg.topic.split('/')
-#         if len(topic_parts) >= 4:
-#             device_id = topic_parts[2]
-#             method = topic_parts[-1]
-#             match method:
-#                 case "action":
-#                     for device in data:
-#                         if device['id'] == device_id:
-#                             for key, value in payload.items():
-#                                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-#                                 device["parameters"][key] = value
-#                             return
-#                     app.logger.error(f"Device ID {device_id} not found")
-#                 case "update":
-#                     for device in data:
-#                         if device['id'] == device_id:
-#                             for key, value in payload.items():
-#                                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-#                                 device[key] = value
-#                             return
-#                     app.logger.error(f"Device ID {device_id} not found")
-#                 case "post":
-#                     if validate_device_data(payload):
-#                         if id_exists(payload["id"]):
-#                             app.logger.error("ID already exists")
-#                             return
-#                         data.append(payload)
-#                         app.logger.info("Device added successfully")
-#                         return
-#                     app.logger.error("Missing required field")
-#                     return
-#                 case "delete":
-#                     index_to_delete = None
-#                     if id_exists(device_id):
-#                         for index, device in enumerate(data):
-#                             if device["id"] == device_id:
-#                                 index_to_delete = index
-#                         if index_to_delete is not None:
-#                             data.pop(index_to_delete)
-#                             app.logger.info("Device deleted successfully")
-#                             return
-#                     app.logger.error("ID not found")
-#                     return
-#                 case _:
-#                     app.logger.error(f"Unknown method: {method}")
-#         else:
-#             app.logger.error(f"Incorrect topic {msg.topic}")
+        # Extract device_id from topic: expected format project/home/<device_id>/<method>
+        topic_parts = msg.topic.split('/')
+        if len(topic_parts) == 4:
+            device_id = topic_parts[2]
+            method = topic_parts[-1]
+            devices = list(devices_collection.find({}, {'_id': 0}))
+            match method:
+                case "action":
+                    for device in devices:
+                        if device['id'] == device_id:
+                            update_fields = {}
 
-#     except UnicodeError as e:
-#         app.logger.exception(f"Error decoding payload: {e.reason}")
+                            for key, value in payload.items():
+                                app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+                                field_name = f"parameters.{key}"
+                                update_fields[field_name] = value
 
+                            devices_collection.update_one(
+                                {"id": device_id},
+                                {"$set": update_fields}
+                            )
+                            return
+                    app.logger.error(f"Device ID {device_id} not found")
+                case "update":
+                    for device in devices:
+                        if device['id'] == device_id:
+                            for key, value in payload.items():
+                                app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+                                # Find device by id and update the fields with 'set'
+                            devices_collection.update_one(
+                            {"id": device_id},
+                            {"$set": payload}
+                            )
+                            return
+                    app.logger.error(f"Device ID {device_id} not found")
+                case "post":
+                    if validate_device_data(payload):
+                        if id_exists(payload["id"]):
+                            app.logger.error("ID already exists")
+                            return
+                        devices_collection.insert_one(payload)
+                        app.logger.info("Device added successfully")
+                        return
+                    app.logger.error("Missing required field")
+                    return
+                case "delete":
+                    if id_exists(device_id):
+                        devices_collection.delete_one({"id": device_id})
+                        app.logger.info("Device deleted successfully")
+                        return
+                    app.logger.error("ID not found")
+                    return
+                case _:
+                    app.logger.error(f"Unknown method: {method}")
+        else:
+            app.logger.error(f"Incorrect topic {msg.topic}")
+
+    except UnicodeError as e:
+        app.logger.exception(f"Error decoding payload: {e.reason}")
 
 # Returns a list of device IDs
 @app.get("/api/ids")
