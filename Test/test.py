@@ -14,7 +14,7 @@ data = {
 
 # Get current devices list
 response = requests.get("http://localhost:5200/api/devices")
-if 199 > response.status_code > 400:
+if 199 < response.status_code < 400:
     print("API is responding")
 else:
     print("API is not up")
@@ -25,3 +25,27 @@ requests.post("http://localhost:5200/api/devices", json = data)
 
 # Check if the new device was added
 response = requests.get("http://localhost:5200/api/devices")
+output = response.json()
+for device in output:
+    if device["id"] == data["id"]:
+        print("Test device added successfully")
+        # print(response.json())
+        break
+else:
+    print("API is not functioning properly")
+    sys.exit(1)
+
+# delete Test Device
+requests.delete(f"http://localhost:5200/api/devices/{data['id']}")
+
+# Check if the test device was deleted
+response = requests.get("http://localhost:5200/api/devices")
+output = response.json()
+for device in output:
+    if device["id"] == data["id"]:
+        print("API is not functioning properly")
+        sys.exit(1)
+        break
+else:
+    print("Test device deleted successfully")
+    sys.exit(0)
