@@ -72,7 +72,7 @@ def on_connect(mqtt_client, userdata, flags, rc):
 
 # Receives the published mqtt payloads and updates the database accordingly
 @mqtt.on_message()
-def on_message(client, userdata, msg):
+def on_message(mqtt_client, userdata, msg):
     app.logger.info(f"MQTT Message Received on {msg.topic}")
     try:
         payload = json.loads(msg.payload.decode())
@@ -96,15 +96,14 @@ def on_message(client, userdata, msg):
             devices = list(devices_collection.find({}, {'_id': 0}))
             match method:
                 case "action":
+                    # Only update device parameters
                     for device in devices:
                         if device['id'] == device_id:
                             update_fields = {}
-
                             for key, value in payload.items():
                                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
                                 field_name = f"parameters.{key}"
                                 update_fields[field_name] = value
-
                             devices_collection.update_one(
                                 {"id": device_id},
                                 {"$set": update_fields}
@@ -112,20 +111,22 @@ def on_message(client, userdata, msg):
                             return
                     app.logger.error(f"Device ID {device_id} not found")
                 case "update":
+                    # Only update device configuration (i.e. name, status, and room)
                     for device in devices:
                         if device['id'] == device_id:
                             for key, value in payload.items():
                                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
                                 # Find device by id and update the fields with 'set'
                             devices_collection.update_one(
-                            {"id": device_id},
-                            {"$set": payload}
+                                {"id": device_id},
+                                {"$set": payload}
                             )
                             return
                     app.logger.error(f"Device ID {device_id} not found")
                 case "post":
+                    # Add a new device to the database
                     if validate_device_data(payload):
-                        if id_exists(payload["id"]):
+                        if id_exists(payload["id"]) or id_exists(device_id):
                             app.logger.error("ID already exists")
                             return
                         devices_collection.insert_one(payload)
@@ -134,6 +135,7 @@ def on_message(client, userdata, msg):
                     app.logger.error("Missing required field")
                     return
                 case "delete":
+                    # Remove a device from the database
                     if id_exists(device_id):
                         devices_collection.delete_one({"id": device_id})
                         app.logger.info("Device deleted successfully")
@@ -147,6 +149,7 @@ def on_message(client, userdata, msg):
 
     except UnicodeError as e:
         app.logger.exception(f"Error decoding payload: {e.reason}")
+
 
 # Returns a list of device IDs
 @app.get("/api/ids")
@@ -196,7 +199,7 @@ def add_device():
 def delete_device(device_id):
     if id_exists(device_id):
         devices_collection.delete_one({"id": device_id})
-        #new_device.pop("_id", None)
+        # new_device.pop("_id", None)
         publish_mqtt(
             contents={},
             device_id=device_id,
