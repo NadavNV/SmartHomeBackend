@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from flask_mqtt import Mqtt
 import json
 import atexit
@@ -6,6 +6,8 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from dotenv import load_dotenv
 import os
+import time
+from prometheus_client import Counter, Histogram, generate_latest
 
 # Env variables
 load_dotenv()
@@ -24,6 +26,8 @@ devices_collection = db["devices"]
 BROKER_URL = "test.mosquitto.org"
 BROKER_PORT = 1883  # MQTT, unencrypted, unauthenticated
 
+REQUEST_COUNT = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
+REQUEST_LATENCY = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
 
 # Validates that the request data contains all the required fields
 def validate_device_data(new_device):
@@ -150,6 +154,13 @@ def on_message(mqtt_client, userdata, msg):
     except UnicodeError as e:
         app.logger.exception(f"Error decoding payload: {e.reason}")
 
+@app.before_request
+def before_request():
+    request.start_time = time.time()
+
+@app.route("/metrics")
+def metrics():
+    return Response(generate_latest(), mimetype="text/plain")
 
 # Returns a list of device IDs
 @app.get("/api/ids")
@@ -261,7 +272,14 @@ def rt_action(device_id):
 
 # Adds required headers to the response
 @app.after_request
-def add_header(response):
+def after_request_combined(response):
+    # Prometheus tracking
+    if hasattr(request, 'start_time'):
+        duration = time.time() - request.start_time
+        REQUEST_COUNT.labels(request.method, request.path).inc()
+        REQUEST_LATENCY.labels(request.path).observe(duration)
+
+    # CORS headers
     if request.method == 'OPTIONS':
         response.headers['Allow'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH'
