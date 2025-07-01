@@ -29,6 +29,7 @@ BROKER_PORT = 1883  # MQTT, unencrypted, unauthenticated
 REQUEST_COUNT = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
 REQUEST_LATENCY = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
 
+
 # Validates that the request data contains all the required fields
 def validate_device_data(new_device):
     required_fields = ['id', 'type', 'room', 'name', 'status', 'parameters']
@@ -97,12 +98,18 @@ def on_message(mqtt_client, userdata, msg):
         if len(topic_parts) == 4:
             device_id = topic_parts[2]
             method = topic_parts[-1]
+            # device = devices_collection.find_one(filter={"id": device_id}, projection={'_id': False})
+            # if device is None:
+            #     app.logger.error(f"Device ID {device_id} not found")
+            #     return
             devices = list(devices_collection.find({}, {'_id': 0}))
             match method:
                 case "action":
                     # Only update device parameters
                     for device in devices:
                         if device['id'] == device_id:
+                            if not validate_action_parameters(device['type'], payload):
+                                return
                             update_fields = {}
                             for key, value in payload.items():
                                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
@@ -114,23 +121,37 @@ def on_message(mqtt_client, userdata, msg):
                             )
                             return
                     app.logger.error(f"Device ID {device_id} not found")
+                    return
                 case "update":
                     # Only update device configuration (i.e. name, status, and room)
+                    if "id" in payload and payload["id"] != device_id:
+                        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload["id"]}")
+                        return
+                    # Make sure that this endpoint is only used to update specific fields
+                    allowed_fields = ['room', 'name', 'status']
+                    for field in payload:
+                        if field not in allowed_fields:
+                            app.logger.error(f"Incorrect field in update method: {field}")
+                            return
                     for device in devices:
                         if device['id'] == device_id:
                             for key, value in payload.items():
                                 app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-                                # Find device by id and update the fields with 'set'
+                            # Find device by id and update the fields with 'set'
                             devices_collection.update_one(
                                 {"id": device_id},
                                 {"$set": payload}
                             )
                             return
                     app.logger.error(f"Device ID {device_id} not found")
+                    return
                 case "post":
                     # Add a new device to the database
+                    if "id" in payload and payload["id"] != device_id:
+                        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload["id"]}")
+                        return
                     if validate_device_data(payload):
-                        if id_exists(payload["id"]) or id_exists(device_id):
+                        if id_exists(payload["id"]):
                             app.logger.error("ID already exists")
                             return
                         devices_collection.insert_one(payload)
@@ -154,13 +175,16 @@ def on_message(mqtt_client, userdata, msg):
     except UnicodeError as e:
         app.logger.exception(f"Error decoding payload: {e.reason}")
 
+
 @app.before_request
 def before_request():
     request.start_time = time.time()
 
+
 @app.route("/metrics")
 def metrics():
     return Response(generate_latest(), mimetype="text/plain")
+
 
 # Returns a list of device IDs
 @app.get("/api/ids")
@@ -220,19 +244,30 @@ def delete_device(device_id):
     return jsonify({"error": "ID not found"}), 404
 
 
-# Changes a device configuration or adds a new configuration
+# Changes a device configuration (i.e. name, room, or status) or adds a new configuration
 @app.put("/api/devices/<device_id>")
 def update_device(device_id):
     updated_device = request.json
+    # Remove ID from the received device, to ensure it doesn't overwrite an existing ID
+    id_to_update = updated_device.pop("id", None)
+    if id_to_update and id_to_update != device_id:
+        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {id_to_update}")
+        return jsonify({'error': f"ID mismatch: ID in URL: {device_id}, ID in payload: {id_to_update}"})
+    # Make sure that this endpoint is only used to update specific fields
+    allowed_fields = ['room', 'name', 'status']
+    for field in updated_device:
+        if field not in allowed_fields:
+            app.logger.error(f"Incorrect field in update endpoint: {field}")
+            return jsonify({'error': f"Incorrect field in update endpoint: {field}"})
     if id_exists(device_id):
         app.logger.info(f"Updating device {device_id}")
         for key, value in updated_device.items():
             app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-            # Find device by id and update the fields with 'set'
-            devices_collection.update_one(
-                {"id": device_id},
-                {"$set": updated_device}
-            )
+        # Find device by id and update the fields with 'set'
+        devices_collection.update_one(
+            {"id": device_id},
+            {"$set": updated_device}
+        )
         publish_mqtt(
             contents=updated_device,
             device_id=device_id,
@@ -242,6 +277,51 @@ def update_device(device_id):
     return jsonify({'error': "Device not found"}), 404
 
 
+# Verify that only parameters that are relevant to the device type are being
+# modified. For example, a light shouldn't have a target temperature and a
+# water heater shouldn't have a brightness.
+def validate_action_parameters(device_type: str, updated_parameters: dict) -> bool:
+    match device_type:
+        case "water_heater":
+            allowed_parameters = [
+                "temperature",
+                "target_temperature",
+                "is_heating",
+                "timer_enabled",
+                "scheduled_on",
+                "scheduled_off",
+            ]
+        case 'light':
+            allowed_parameters = [
+                "brightness",
+                "color",
+                "is_dimmable",
+                "dynamic_color",
+            ]
+        case 'air_conditioner':
+            allowed_parameters = [
+                "temperature",
+                "mode",
+                "fan_speed",
+                "swing",
+            ]
+        case 'door_lock':
+            allowed_parameters = [
+                "auto_lock_enabled",
+                "battery_level",
+            ]
+        case 'curtain':
+            allowed_parameters = ["position"]
+        case _:
+            app.logger.error(f"Unknown device type {device_type}")
+            return False
+    for field in updated_parameters:
+        if field not in allowed_parameters:
+            app.logger.error(f"Incorrect field in update endpoint: {field}")
+            return False
+    return True
+
+
 # Sends a real time action to one of the devices.
 # The request's JSON contains the parameters to update
 # and their new values.
@@ -249,7 +329,10 @@ def update_device(device_id):
 def rt_action(device_id):
     action = request.json
     if id_exists(device_id):
+        device = devices_collection.find_one(filter={"id": device_id}, projection={'_id': 0})
         app.logger.info(f"Device action {device_id}")
+        if not validate_action_parameters(device['type'], action):
+            return jsonify({'error': f"Incorrect field in update endpoint or unknown device type"}), 400
         update_fields = {}
 
         for key, value in action.items():
