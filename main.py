@@ -98,34 +98,29 @@ def on_message(mqtt_client, userdata, msg):
         if len(topic_parts) == 4:
             device_id = topic_parts[2]
             method = topic_parts[-1]
-            # device = devices_collection.find_one(filter={"id": device_id}, projection={'_id': False})
-            # if device is None:
-            #     app.logger.error(f"Device ID {device_id} not found")
-            #     return
-            devices = list(devices_collection.find({}, {'_id': 0}))
+            device = devices_collection.find_one({"id": device_id}, {"_id": 0})
+            if device is None:
+                app.logger.error(f"Device ID {device_id} not found")
+                return
             match method:
                 case "action":
                     # Only update device parameters
-                    for device in devices:
-                        if device['id'] == device_id:
-                            if not validate_action_parameters(device['type'], payload):
-                                return
-                            update_fields = {}
-                            for key, value in payload.items():
-                                app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-                                field_name = f"parameters.{key}"
-                                update_fields[field_name] = value
-                            devices_collection.update_one(
-                                {"id": device_id},
-                                {"$set": update_fields}
-                            )
-                            return
-                    app.logger.error(f"Device ID {device_id} not found")
+                    if not validate_action_parameters(device['type'], payload):
+                        return
+                    update_fields = {}
+                    for key, value in payload.items():
+                        app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+                        field_name = f"parameters.{key}"
+                        update_fields[field_name] = value
+                    devices_collection.update_one(
+                        {"id": device_id},
+                        {"$set": update_fields}
+                    )
                     return
                 case "update":
                     # Only update device configuration (i.e. name, status, and room)
                     if "id" in payload and payload["id"] != device_id:
-                        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload["id"]}")
+                        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
                         return
                     # Make sure that this endpoint is only used to update specific fields
                     allowed_fields = ['room', 'name', 'status']
@@ -133,17 +128,13 @@ def on_message(mqtt_client, userdata, msg):
                         if field not in allowed_fields:
                             app.logger.error(f"Incorrect field in update method: {field}")
                             return
-                    for device in devices:
-                        if device['id'] == device_id:
-                            for key, value in payload.items():
-                                app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-                            # Find device by id and update the fields with 'set'
-                            devices_collection.update_one(
-                                {"id": device_id},
-                                {"$set": payload}
-                            )
-                            return
-                    app.logger.error(f"Device ID {device_id} not found")
+                    for key, value in payload.items():
+                        app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+                    # Find device by id and update the fields with 'set'
+                    devices_collection.update_one(
+                        {"id": device_id},
+                        {"$set": payload}
+                    )
                     return
                 case "post":
                     # Add a new device to the database
@@ -203,10 +194,9 @@ def get_all_devices():
 # Get data on a specific device by its ID
 @app.get("/api/devices/<device_id>")
 def get_device(device_id):
-    devices = list(devices_collection.find({}, {'_id': 0}))
-    for device in devices:
-        if device_id == device['id']:
-            return device
+    device = devices_collection.find_one({'id': device_id}, {'_id': 0})
+    if device:
+        return jsonify(device)
     return jsonify({'error': "ID not found"}), 400
 
 
