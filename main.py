@@ -139,7 +139,7 @@ def on_message(mqtt_client, userdata, msg):
                 case "post":
                     # Add a new device to the database
                     if "id" in payload and payload["id"] != device_id:
-                        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload["id"]}")
+                        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
                         return
                     if validate_device_data(payload):
                         if id_exists(payload["id"]):
