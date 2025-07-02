@@ -16,10 +16,13 @@ username = os.getenv("MONGO_USER")
 password = os.getenv("MONGO_PASS")
 
 # Database parameters
-uri = f"mongodb+srv://{username}:{password}@smart-home-db.w9dsqtr.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-db"
-client = MongoClient(uri, server_api=ServerApi('1'))
+uri = (
+    f"mongodb+srv://{username}:{password}" +
+    "@smart-home-db.w9dsqtr.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-db"
+)
+mongo_client = MongoClient(uri, server_api=ServerApi('1'))
 
-db = client["smart_home"]
+db = mongo_client["smart_home"]
 devices_collection = db["devices"]
 
 # Setting up the MQTT client
@@ -41,11 +44,8 @@ def validate_device_data(new_device):
 
 # Checks the validity of the device id
 def id_exists(device_id):
-    devices = list(devices_collection.find({}, {'_id': 0}))
-    for device in devices:
-        if device_id == device["id"]:
-            return True
-    return False
+    device = devices_collection.find_one({"id": device_id}, {'_id': 0})
+    return device is not None
 
 
 app = Flask(__name__)
@@ -56,7 +56,7 @@ app.config['MQTT_PASSWORD'] = ''  # set the password here if the broker demands 
 app.config['MQTT_KEEPALIVE'] = 5  # set the time interval for sending a ping to the broker to 5 seconds
 app.config['MQTT_TLS_ENABLED'] = False  # set TLS to disabled for testing purposes
 
-mqtt = Mqtt(app)
+mqtt = Mqtt(app, connect_async=True)
 
 
 # Formats and publishes the mqtt topic and payload -> the mqtt publisher
@@ -195,9 +195,10 @@ def get_all_devices():
 @app.get("/api/devices/<device_id>")
 def get_device(device_id):
     device = devices_collection.find_one({'id': device_id}, {'_id': 0})
-    if device:
+    if device is not None:
         return jsonify(device)
-    return jsonify({'error': "ID not found"}), 400
+    app.logger.error(f"ID {device_id} not found")
+    return jsonify({'error': f"ID {device_id} not found"}), 400
 
 
 # Adds a new device
@@ -242,13 +243,13 @@ def update_device(device_id):
     id_to_update = updated_device.pop("id", None)
     if id_to_update and id_to_update != device_id:
         app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {id_to_update}")
-        return jsonify({'error': f"ID mismatch: ID in URL: {device_id}, ID in payload: {id_to_update}"})
+        return jsonify({'error': f"ID mismatch: ID in URL: {device_id}, ID in payload: {id_to_update}"}), 400
     # Make sure that this endpoint is only used to update specific fields
     allowed_fields = ['room', 'name', 'status']
     for field in updated_device:
         if field not in allowed_fields:
             app.logger.error(f"Incorrect field in update endpoint: {field}")
-            return jsonify({'error': f"Incorrect field in update endpoint: {field}"})
+            return jsonify({'error': f"Incorrect field in update endpoint: {field}"}), 400
     if id_exists(device_id):
         app.logger.info(f"Updating device {device_id}")
         for key, value in updated_device.items():
@@ -318,29 +319,27 @@ def validate_action_parameters(device_type: str, updated_parameters: dict) -> bo
 @app.post("/api/devices/<device_id>/action")
 def rt_action(device_id):
     action = request.json
-    if id_exists(device_id):
-        device = devices_collection.find_one(filter={"id": device_id}, projection={'_id': 0})
-        app.logger.info(f"Device action {device_id}")
-        if not validate_action_parameters(device['type'], action):
-            return jsonify({'error': f"Incorrect field in update endpoint or unknown device type"}), 400
-        update_fields = {}
-
-        for key, value in action.items():
-            app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-            field_name = f"parameters.{key}"
-            update_fields[field_name] = value
-
-        devices_collection.update_one(
-            {"id": device_id},
-            {"$set": update_fields}
-        )
-        publish_mqtt(
-            contents=action,
-            device_id=device_id,
-            method="action",
-        )
-        return jsonify({'output': "Action applied to device and published via MQTT"}), 200
-    return jsonify({'error': "ID not found"}), 404
+    app.logger.info(f"Device action {device_id}")
+    device = devices_collection.find_one(filter={"id": device_id}, projection={'_id': 0})
+    if device is None:
+        app.logger.error(f"ID {device_id} not found")
+        return jsonify({'error': "ID not found"}), 404
+    if not validate_action_parameters(device['type'], action):
+        return jsonify({'error': f"Incorrect field in update endpoint or unknown device type"}), 400
+    update_fields = {}
+    for key, value in action.items():
+        app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+        update_fields[f"parameters.{key}"] = value
+    devices_collection.update_one(
+        {"id": device_id},
+        {"$set": update_fields}
+    )
+    publish_mqtt(
+        contents=action,
+        device_id=device_id,
+        method="action",
+    )
+    return jsonify({'output': "Action applied to device and published via MQTT"}), 200
 
 
 # Adds required headers to the response
