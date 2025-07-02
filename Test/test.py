@@ -13,7 +13,7 @@ data = {
     }
 
 # Get current devices list
-response = requests.get("http://localhost:5200/api/devices")
+response = requests.get("http://172.17.0.1:5200/api/devices")
 if 199 < response.status_code < 400:
     print("API is responding")
 else:
@@ -21,10 +21,10 @@ else:
     sys.exit(1)
 
 # Add a new test device
-requests.post("http://localhost:5200/api/devices", json = data)
+requests.post("http://172.17.0.1:5200/api/devices", json = data)
 
 # Check if the new device was added
-response = requests.get("http://localhost:5200/api/devices")
+response = requests.get("http://172.17.0.1:5200/api/devices")
 output = response.json()
 for device in output:
     if device["id"] == data["id"]:
@@ -36,10 +36,10 @@ else:
     sys.exit(1)
 
 # delete Test Device
-requests.delete(f"http://localhost:5200/api/devices/{data['id']}")
+requests.delete(f"http://172.17.0.1:5200/api/devices/{data['id']}")
 
 # Check if the test device was deleted
-response = requests.get("http://localhost:5200/api/devices")
+response = requests.get("http://172.17.0.1:5200/api/devices")
 output = response.json()
 for device in output:
     if device["id"] == data["id"]:
@@ -49,3 +49,11 @@ for device in output:
 else:
     print("Test device deleted successfully")
     sys.exit(0)
+
+# test connection to frontend
+response = requests.get("https://nadavnv.github.io/SmartHomeDashboard/")
+if 199 < response.status_code < 400:
+    print("Frontend is up")
+else:
+    print("Frontend is not down")
+    sys.exit(1)
