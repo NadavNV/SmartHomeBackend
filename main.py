@@ -1,13 +1,34 @@
 from flask import Flask, jsonify, request, Response
-from flask_mqtt import Mqtt
+import paho.mqtt.client as paho
 import json
 import atexit
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
+from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure
 from dotenv import load_dotenv
 import os
 import time
+import random
+import socket
+import sys
+import logging.handlers
 from prometheus_client import Counter, Histogram, generate_latest
+
+logging.basicConfig(
+    format="[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
+    handlers=[
+        # Prints to sys.stderr
+        logging.StreamHandler(),
+        # Writes to a log file which rotates every 1mb, or gets overwritten when the app is restarted
+        logging.handlers.RotatingFileHandler(
+            filename="simulator.log",
+            mode='w',
+            maxBytes=1024 * 1024,
+            backupCount=3
+        )
+    ],
+    level=logging.INFO,
+)
 
 # Env variables
 load_dotenv()
@@ -15,15 +36,8 @@ load_dotenv()
 username = os.getenv("MONGO_USER")
 password = os.getenv("MONGO_PASS")
 
-# Database parameters
-uri = (
-    f"mongodb+srv://{username}:{password}" +
-    "@smart-home-db.w9dsqtr.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-db"
-)
-mongo_client = MongoClient(uri, server_api=ServerApi('1'))
-
-db = mongo_client["smart_home"]
-devices_collection = db["devices"]
+# How many times to attempt a connection request
+RETRIES = 5
 
 # Setting up the MQTT client
 BROKER_URL = "test.mosquitto.org"
@@ -49,39 +63,51 @@ def id_exists(device_id):
 
 
 app = Flask(__name__)
-app.config['MQTT_BROKER_URL'] = BROKER_URL
-app.config['MQTT_BROKER_PORT'] = BROKER_PORT
-app.config['MQTT_USERNAME'] = ''  # set the username here if you need authentication for the broker
-app.config['MQTT_PASSWORD'] = ''  # set the password here if the broker demands authentication
-app.config['MQTT_KEEPALIVE'] = 5  # set the time interval for sending a ping to the broker to 5 seconds
-app.config['MQTT_TLS_ENABLED'] = False  # set TLS to disabled for testing purposes
 
-mqtt = Mqtt(app, connect_async=True)
+# Database parameters
+uri = (
+        f"mongodb+srv://{username}:{password}" +
+        "@smart-home-db.w9dsqtr.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-db"
+)
+try:
+    mongo_client = MongoClient(uri, server_api=ServerApi('1'))
+except ConfigurationError:
+    app.logger.error("Failed to connect to database. Shutting down.")
+    sys.exit(1)
 
+for attempt in range(RETRIES):
+    try:
+        mongo_client.admin.command('ping')
+    except (ConnectionFailure, OperationFailure):
+        delay = 2 ** attempt + random.random()
+        app.logger.error(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
+        time.sleep(delay)
 
-# Formats and publishes the mqtt topic and payload -> the mqtt publisher
-def publish_mqtt(contents: dict, device_id: str, method: str):
-    topic = f"project/home/{device_id}/{method}"
-    payload = json.dumps({
-        "sender": "backend",
-        "contents": contents,
-    })
-    mqtt.publish(topic, payload.encode(), qos=2)
+try:
+    mongo_client.admin.command('ping')
+except ConnectionFailure:
+    app.logger.error("Failed to connect to database. Shutting down.")
+    sys.exit(1)
+
+db = mongo_client["smart_home"]
+devices_collection = db["devices"]
+
+mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2)
 
 
 # Function to run after the MQTT client finishes connecting to the broker
-@mqtt.on_connect()
-def on_connect(mqtt_client, userdata, flags, rc):
-    mqtt_client.subscribe("project/home/#")
+def on_connect(client, userdata, connect_flags, reason_code, properties):
+    app.logger.info(f'CONNACK received with code {reason_code}.')
+    if reason_code == 0:
+        app.logger.info("Connected successfully")
+        client.subscribe("project/home/#")
 
 
 # Receives the published mqtt payloads and updates the database accordingly
-@mqtt.on_message()
 def on_message(mqtt_client, userdata, msg):
     app.logger.info(f"MQTT Message Received on {msg.topic}")
     try:
         payload = json.loads(msg.payload.decode())
-        app.logger.info(f"Payload: {payload}")
         # Ignore self messages
         if "sender" in payload:
             if payload["sender"] == "backend":
@@ -165,6 +191,35 @@ def on_message(mqtt_client, userdata, msg):
 
     except UnicodeError as e:
         app.logger.exception(f"Error decoding payload: {e.reason}")
+
+
+mqtt.on_connect = on_connect
+mqtt.on_message = on_message
+
+for attempt in range(RETRIES):
+    try:
+        mqtt.connect(BROKER_URL, BROKER_PORT)
+    except socket.gaierror:
+        delay = 2 ** attempt + random.random()
+        app.logger.error(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
+        time.sleep(delay)
+mqtt.loop_start()
+time.sleep(3)
+if not mqtt.is_connected():
+    app.logger.error("Failed to connect to MQTT server. Shutting down.")
+    mongo_client.close()
+    mqtt.loop_stop()
+    sys.exit(1)
+
+
+# Formats and publishes the mqtt topic and payload -> the mqtt publisher
+def publish_mqtt(contents: dict, device_id: str, method: str):
+    topic = f"project/home/{device_id}/{method}"
+    payload = json.dumps({
+        "sender": "backend",
+        "contents": contents,
+    })
+    mqtt.publish(topic, payload.encode(), qos=2)
 
 
 @app.before_request
@@ -342,6 +397,20 @@ def rt_action(device_id):
     return jsonify({'output': "Action applied to device and published via MQTT"}), 200
 
 
+@app.get("/healthy")
+def health_check():
+    return jsonify({"Status": "Healthy"})
+
+
+@app.get("/ready")
+def ready_check():
+    try:
+        mongo_client.admin.command('ping')
+        return jsonify({"Status": "Ready"}) if mqtt.is_connected() else jsonify({"Status": "Not ready"}), 500
+    except (ConnectionFailure, OperationFailure):
+        return jsonify({"Status": "Not ready"}), 500
+
+
 # Adds required headers to the response
 @app.after_request
 def after_request_combined(response):
@@ -361,21 +430,13 @@ def after_request_combined(response):
 
 
 # Function to run when shutting down the server
+@atexit.register
 def on_shutdown():
+    mqtt.loop_stop()
+    mqtt.disconnect()
+    mongo_client.close()
     app.logger.info("Shutting down")
 
-
-atexit.register(on_shutdown)
-
-# GET /api/devices: Get a list of all smart devices with their status.
-# POST /api/devices: Register a new smart device (requires device_id, type, and location in payload).
-# PUT /api/devices/<device_id>: Update a device's configuration or status (e.g., turn on/off).
-# DELETE /api/devices/<device_id>: Remove a smart device.
-# Real-Time Actions:
-# POST /api/devices/<device_id>/action: Send a command to a device (requires action and
-#       optional parameters in JSON payload).
-# Device Analytics:
-# GET /api/devices/analytics: Fetch usage patterns and status trends for devices.
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5200, debug=True, use_reloader=False)
