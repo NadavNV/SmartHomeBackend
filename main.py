@@ -27,7 +27,7 @@ logging.basicConfig(
             backupCount=3
         )
     ],
-    level=logging.DEBUG,
+    level=logging.INFO,
 )
 
 # Env variables
@@ -405,9 +405,17 @@ def health_check():
 @app.get("/ready")
 def ready_check():
     try:
+        app.logger.info("Pinging DB . . .")
         mongo_client.admin.command('ping')
-        return jsonify({"Status": "Ready"}) if mqtt.is_connected() else jsonify({"Status": "Not ready"}), 500
+        app.logger.info("Ping successful. Checking MQTT connection")
+        if mqtt.is_connected():
+            app.logger.info("Connected")
+            return jsonify({"Status": "Ready"})
+        else:
+            app.logger.info("Not connected")
+            return jsonify({"Status": "Not ready"}), 500
     except (ConnectionFailure, OperationFailure):
+        app.logger.exception("Ping failed")
         return jsonify({"Status": "Not ready"}), 500
 
 
