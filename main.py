@@ -27,7 +27,7 @@ logging.basicConfig(
             backupCount=3
         )
     ],
-    level=logging.INFO,
+    level=logging.DEBUG,
 )
 
 # Env variables
