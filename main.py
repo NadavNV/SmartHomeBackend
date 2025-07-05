@@ -405,14 +405,14 @@ def health_check():
 @app.get("/ready")
 def ready_check():
     try:
-        app.logger.info("Pinging DB . . .")
+        app.logger.debug("Pinging DB . . .")
         mongo_client.admin.command('ping')
-        app.logger.info("Ping successful. Checking MQTT connection")
+        app.logger.debug("Ping successful. Checking MQTT connection")
         if mqtt.is_connected():
-            app.logger.info("Connected")
+            app.logger.debug("Connected")
             return jsonify({"Status": "Ready"})
         else:
-            app.logger.info("Not connected")
+            app.logger.debug("Not connected")
             return jsonify({"Status": "Not ready"}), 500
     except (ConnectionFailure, OperationFailure):
         app.logger.exception("Ping failed")
