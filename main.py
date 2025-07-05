@@ -103,6 +103,51 @@ def on_connect(client, userdata, connect_flags, reason_code, properties):
         client.subscribe("project/home/#")
 
 
+# Verify that only parameters that are relevant to the device type are being
+# modified. For example, a light shouldn't have a target temperature and a
+# water heater shouldn't have a brightness.
+def validate_action_parameters(device_type: str, updated_parameters: dict) -> bool:
+    match device_type:
+        case "water_heater":
+            allowed_parameters = [
+                "temperature",
+                "target_temperature",
+                "is_heating",
+                "timer_enabled",
+                "scheduled_on",
+                "scheduled_off",
+            ]
+        case 'light':
+            allowed_parameters = [
+                "brightness",
+                "color",
+                "is_dimmable",
+                "dynamic_color",
+            ]
+        case 'air_conditioner':
+            allowed_parameters = [
+                "temperature",
+                "mode",
+                "fan_speed",
+                "swing",
+            ]
+        case 'door_lock':
+            allowed_parameters = [
+                "auto_lock_enabled",
+                "battery_level",
+            ]
+        case 'curtain':
+            allowed_parameters = ["position"]
+        case _:
+            app.logger.error(f"Unknown device type {device_type}")
+            return False
+    for field in updated_parameters:
+        if field not in allowed_parameters:
+            app.logger.error(f"Incorrect field in update endpoint: {field}")
+            return False
+    return True
+
+
 # Receives the published mqtt payloads and updates the database accordingly
 def on_message(mqtt_client, userdata, msg):
     app.logger.info(f"MQTT Message Received on {msg.topic}")
@@ -321,51 +366,6 @@ def update_device(device_id):
         )
         return jsonify({'output': "Device updated successfully"}), 200
     return jsonify({'error': "Device not found"}), 404
-
-
-# Verify that only parameters that are relevant to the device type are being
-# modified. For example, a light shouldn't have a target temperature and a
-# water heater shouldn't have a brightness.
-def validate_action_parameters(device_type: str, updated_parameters: dict) -> bool:
-    match device_type:
-        case "water_heater":
-            allowed_parameters = [
-                "temperature",
-                "target_temperature",
-                "is_heating",
-                "timer_enabled",
-                "scheduled_on",
-                "scheduled_off",
-            ]
-        case 'light':
-            allowed_parameters = [
-                "brightness",
-                "color",
-                "is_dimmable",
-                "dynamic_color",
-            ]
-        case 'air_conditioner':
-            allowed_parameters = [
-                "temperature",
-                "mode",
-                "fan_speed",
-                "swing",
-            ]
-        case 'door_lock':
-            allowed_parameters = [
-                "auto_lock_enabled",
-                "battery_level",
-            ]
-        case 'curtain':
-            allowed_parameters = ["position"]
-        case _:
-            app.logger.error(f"Unknown device type {device_type}")
-            return False
-    for field in updated_parameters:
-        if field not in allowed_parameters:
-            app.logger.error(f"Incorrect field in update endpoint: {field}")
-            return False
-    return True
 
 
 # Sends a real time action to one of the devices.
