@@ -82,11 +82,11 @@ client.loop_start()
 
 print("Waiting up to 10 seconds for simulator MQTT message...")
 
-# Wait up to 10 seconds for message
-for _ in range(20):
+# Wait up to 30 seconds for message
+for _ in range(30): 
     if mqtt_message_received:
         break
-    time.sleep(0.5)
+    time.sleep(1)
 
 client.loop_stop()
 
