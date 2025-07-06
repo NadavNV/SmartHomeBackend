@@ -40,8 +40,8 @@ password = os.getenv("MONGO_PASS")
 RETRIES = 5
 
 # Setting up the MQTT client
-BROKER_URL = "test.mosquitto.org"
-BROKER_PORT = 1883  # MQTT, unencrypted, unauthenticated
+BROKER_URL = os.getenv("BROKER_URL", "test.mosquitto.org")
+BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 
 REQUEST_COUNT = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
 REQUEST_LATENCY = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
