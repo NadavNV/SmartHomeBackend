@@ -3,6 +3,8 @@ import sys
 import time
 import paho.mqtt.client as mqtt
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3001")
+
 data = {
     "id": "test-device",
     "type": "test_device",
@@ -53,7 +55,7 @@ else:
     api_test = True
 
 ### ---------- Test 2: Frontend ----------
-response = requests.get("http://frontend-container:3001")
+response = requests.get(FRONTEND_URL)
 if 199 < response.status_code < 400:
     print("Frontend is up")
     frontend_test = True
