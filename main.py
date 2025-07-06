@@ -246,7 +246,7 @@ mqtt.on_message = on_message
 for attempt in range(RETRIES):
     try:
         mqtt.connect(BROKER_URL, BROKER_PORT)
-    except socket.gaierror:
+    except Exception:
         delay = 2 ** attempt + random.random()
         app.logger.error(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
         time.sleep(delay)
