@@ -1,6 +1,7 @@
 import requests
 import sys
 import time
+import os
 import paho.mqtt.client as mqtt
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3001")
