@@ -1,4 +1,5 @@
 from flask import Flask, jsonify, request, Response
+from werkzeug.middleware.proxy_fix import ProxyFix
 import paho.mqtt.client as paho
 import json
 import atexit
@@ -63,6 +64,7 @@ def id_exists(device_id):
 
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 # Database parameters
 uri = (
