@@ -5,6 +5,7 @@ import os
 import paho.mqtt.client as mqtt
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3001")
+backend_url = os.getenv("BACKEND_URL", "http://localhost:5200")
 
 data = {
     "id": "test-device",
@@ -22,7 +23,7 @@ frontend_test = False
 simulator_test = False
 
 ### ---------- Test 1: API test ----------
-response = requests.get("http://test-container:5200/api/devices")
+response = requests.get(f"{backend_url}/api/devices")
 if 199 < response.status_code < 400:
     print("API is responding")
 else:
@@ -30,10 +31,10 @@ else:
     sys.exit(1)
 
 # Add a new test device
-requests.post("http://test-container:5200/api/devices", json=data)
+requests.post(f"{backend_url}/api/devices", json=data)
 
 # Check if the new device was added
-response = requests.get("http://test-container:5200/api/devices")
+response = requests.get(f"{backend_url}/api/devices")
 output = response.json()
 for device in output:
     if device["id"] == data["id"]:
@@ -44,8 +45,8 @@ else:
     sys.exit(1)
 
 # delete Test Device
-requests.delete(f"http://test-container:5200/api/devices/{data['id']}")
-response = requests.get("http://test-container:5200/api/devices")
+requests.delete(f"{backend_url}/api/devices/{data['id']}")
+response = requests.get(f"{backend_url}/api/devices")
 output = response.json()
 for device in output:
     if device["id"] == data["id"]:
