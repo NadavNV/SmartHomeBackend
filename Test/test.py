@@ -53,7 +53,7 @@ else:
     api_test = True
 
 ### ---------- Test 2: Frontend ----------
-response = requests.get("https://nadavnv.github.io/SmartHomeDashboard/")
+response = requests.get("http://frontend-container:3001")
 if 199 < response.status_code < 400:
     print("Frontend is up")
     frontend_test = True
