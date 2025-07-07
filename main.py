@@ -248,7 +248,7 @@ for attempt in range(RETRIES):
         mqtt.connect(BROKER_URL, BROKER_PORT)
     except Exception:
         delay = 2 ** attempt + random.random()
-        app.logger.error(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
+        app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
         time.sleep(delay)
 mqtt.loop_start()
 time.sleep(3)
