@@ -33,12 +33,27 @@ messages from the different devices to update and maintain a MongoDB database as
     - Run `pip install -r requirements.txt`.
     - Run `python main.py`.
 - To run in a Docker container:
-    - Make sure you have a running Docker engine.
+    - Make sure you have a running Docker engine and MongoDB credentials.
     - Clone this repo:
       ```bash
       git clone https://github.com/NadavNV/SmartHomeBackend.git
       cd SmartHomeBackend
       ```
-    - This app requires two images, one for the app itself and one for the nginx reverse-proxy. Run: ```bash docker build -t <name for the image> .```
+    - This app requires two images, one for the app itself and one for the nginx reverse-proxy. Run:
+      ```bash
+      docker build -f flask.Dockerfile -t <name for the Flask image> .
+      docker build -f nginx.Dockerfile -t <name for the nginx image> .
+      ```
+    - Run:
+      ```bash
+      docker run -d -p 5200:5200 [--network host] [--name <name for the container] <name of the nginx image>
+      docker run [-d] -p 8000:8000 [--network host] [--name <name for the container] \
+      -e "MONGO_USER=<MongoDb user name>" -e "MONGO_PASS=<MongoDB password>" <name of the Flask image>
+      ```
+        - Use --network host to use the image as-is. If you don't want to use the host network, you need to edit
+          `nginx.conf` and replace `localhost` with the name or IP of the Flask container.
+        - use -d for the Flask container to run it in the background, or omit it to see logging messages.
 
-    - Run `docker run -e "API_URL=<full backend address>" <image name>`.
+## API Reference
+
+      

@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 import os
 import time
 import random
-import socket
 import sys
 import logging.handlers
 from prometheus_client import Counter, Histogram, generate_latest
@@ -236,7 +235,7 @@ def on_message(mqtt_client, userdata, msg):
         else:
             app.logger.error(f"Incorrect topic {msg.topic}")
 
-    except UnicodeError as e:
+    except UnicodeDecodeError as e:
         app.logger.exception(f"Error decoding payload: {e.reason}")
 
 
