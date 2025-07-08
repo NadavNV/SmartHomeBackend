@@ -7,6 +7,9 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure
 from dotenv import load_dotenv
+from typing import Any
+from threading import Event
+import re
 import os
 import time
 import random
@@ -21,7 +24,7 @@ logging.basicConfig(
         logging.StreamHandler(),
         # Writes to a log file which rotates every 1mb, or gets overwritten when the app is restarted
         logging.handlers.RotatingFileHandler(
-            filename="simulator.log",
+            filename="backend.log",
             mode='w',
             maxBytes=1024 * 1024,
             backupCount=3
@@ -38,21 +41,345 @@ password = os.getenv("MONGO_PASS")
 
 # How many times to attempt a connection request
 RETRIES = 5
+RETRY_TIMEOUT = 10
 
 # Setting up the MQTT client
 BROKER_URL = os.getenv("BROKER_URL", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 
+DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING")
+
 REQUEST_COUNT = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
 REQUEST_LATENCY = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
 
+# Minimum temperature (Celsius) for water heater
+MIN_WATER_TEMP = 49
+# Maximum temperature (Celsius) for water heater
+MAX_WATER_TEMP = 60
+# Minimum temperature (Celsius) for air conditioner
+MIN_AC_TEMP = 16
+# Maximum temperature (Celsius) for air conditioner
+MAX_AC_TEMP = 30
+# Minimum brightness for dimmable light
+MIN_BRIGHTNESS = 0
+# Maximum brightness for dimmable light
+MAX_BRIGHTNESS = 100
+# Minimum position for curtain
+MIN_POSITION = 0
+# Maximum position for curtain
+MAX_POSITION = 100
+# Minimum value for battery level
+MIN_BATTERY = 0
+# Maximum value for battery level
+MAX_BATTERY = 100
 
-# Validates that the request data contains all the required fields
-def validate_device_data(new_device):
-    required_fields = ['id', 'type', 'room', 'name', 'status', 'parameters']
-    for field in required_fields:
-        if field not in new_device:
+DEVICE_TYPES = {"light", "water_heater", "air_conditioner", "door_lock", "curtain"}
+WATER_HEATER_PARAMETERS = {
+    "temperature",
+    "target_temperature",
+    "is_heating",
+    "timer_enabled",
+    "scheduled_on",
+    "scheduled_off",
+}
+LIGHT_PARAMETERS = {
+    "brightness",
+    "color",
+    "is_dimmable",
+    "dynamic_color",
+}
+AC_PARAMETERS = {
+    "temperature",
+    "mode",
+    "fan_speed",
+    "swing",
+}
+AC_MODES = {'cool', 'heat', 'fan'}
+AC_FAN_SETTINGS = {'off', 'low', 'medium', 'high'}
+AC_SWING_MODES = {'off', 'on', 'auto'}
+LOCK_PARAMETERS = {
+    "auto_lock_enabled",
+    "battery_level",
+}
+CURTAIN_PARAMETERS = {
+    "position",
+}
+
+# Regex explanation:
+#
+# ([01]?[0-9]|2[0-3]) - Hours. Either a 2 followed by 0-3 or an optional
+#                       initial digit of 0 or 1 followed by any digit.
+# : - Colon.
+# ([0-5]\d) - Minutes, 0-5 followed by any digit.
+TIME_REGEX = '^([01][0-9]|2[0-3]):([0-5][0-9])$'
+
+COLOR_REGEX = '^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$'
+
+
+def verify_type_and_range(value: Any, name: str, cls: type,
+                          value_range: tuple[int, int] | set[str] | str | None = None) -> bool:
+    """
+    This function verifies that 'value' is of type 'cls', and when relevant that it is
+    within an allowed range of values.
+    If 'cls' is int, then value_range maybe a tuple of (min_value, max_value). If 'cls' is
+    str, then 'value_range' may be a set of allowed values. If 'cls' is str and 'value_range'
+    is the string 'time' then 'value' must be a valid ISO format time string without seconds.
+    if 'cls' is str and 'value_range' is the string 'color' then 'value' must be a valid
+    HTML RGB string.
+    :param value: The value to be checked.
+    :param name: The name associated with the value, for error messages.
+    :param cls: The type to check against.
+    :param value_range: The value of 'value' is expected to fall within this range, if given.
+    :return: True if 'value' is of type 'cls' and matches the given 'value_range', False otherwise.
+    """
+    if cls == int:
+        try:
+            value = int(value)
+            if value_range is not None:
+                minimum, maximum = value_range
+                if value > maximum or value < minimum:
+                    app.logger.error(f"{name} must be between {minimum} and {maximum}, got {value} instead.")
+                    return False
+            return True
+        except ValueError:
+            app.logger.error(f"{name} must be a numeric string, got {value} instead.")
             return False
+    if type(value) is not cls:
+        app.logger.error(f"{name} must be a {cls}, got {type(value)} instead.")
+        return False
+    if cls == str:
+        if type(value_range) is set:
+            if value not in value_range:
+                app.logger.error(f"{name} must be one of {value_range}, "
+                                 f"got {value} instead.")
+                return False
+        elif value_range == 'time':
+            return bool(re.match(TIME_REGEX, value))
+        elif value_range == 'color':
+            return bool(re.match(COLOR_REGEX, value))
+    return True
+
+
+# Verify that the given string is a correct ISO format time string (without seconds)
+def verify_time_string(string: str) -> bool:
+    return bool(re.match(TIME_REGEX, string))
+
+
+# Validates that the request to add a new device contains only valid information
+def validate_device_data(new_device):
+    required_fields = {'id', 'type', 'room', 'name', 'status', 'parameters'}
+    if set(new_device.keys()) != required_fields:
+        app.logger.error(f"Incorrect field(s) in new device {set(new_device.keys()) - required_fields}, "
+                         f"must be exactly these fields: {required_fields}")
+        return False
+    for field in list(new_device.keys()):
+        if field == 'type' and new_device['type'] not in DEVICE_TYPES:
+            app.logger.error(f"Incorrect device type {new_device['type']}, must be on of {DEVICE_TYPES}.")
+            return False
+        if field == 'status':
+            if 'type' in new_device and new_device['type'] in DEVICE_TYPES:
+                match new_device['type']:
+                    case "door_lock":
+                        if not verify_type_and_range(
+                            value=new_device['status'],
+                            name="'status'",
+                            cls=str,
+                            value_range={'open', 'locked'},
+                        ):
+                            return False
+                    case "curtain":
+                        if not verify_type_and_range(
+                                value=new_device['status'],
+                                name="'status'",
+                                cls=str,
+                                value_range={'open', 'closed'},
+                        ):
+                            return False
+                    case _:
+                        if not verify_type_and_range(
+                                value=new_device['status'],
+                                name="'status'",
+                                cls=str,
+                                value_range={'on', 'off'},
+                        ):
+                            return False
+        if field == 'parameters':
+            if 'type' in new_device and new_device['type'] in DEVICE_TYPES:
+                if not verify_type_and_range(
+                    value=new_device['parameters'],
+                    name="'parameters'",
+                    cls=dict,
+                ):
+                    return False
+                left_over_parameters = set(new_device['parameters'].keys())
+                match new_device['type']:
+                    case "door_lock":
+                        left_over_parameters -= LOCK_PARAMETERS
+                        if left_over_parameters != set():
+                            app.logger.error(f"Disallowed parameters for door lock {left_over_parameters}, "
+                                             f"allowed parameters: {LOCK_PARAMETERS}")
+                            return False
+                        for key, value in new_device['parameters'].items():
+                            if key == 'auto_lock_enabled':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'auto_lock_enabled'",
+                                    cls=bool,
+                                ):
+                                    return False
+                            elif key == 'battery_level':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'battery_level'",
+                                    cls=int,
+                                    value_range=(MIN_BATTERY, MAX_BATTERY),
+                                ):
+                                    return False
+                    case "curtain":
+                        left_over_parameters -= CURTAIN_PARAMETERS
+                        if left_over_parameters != set():
+                            app.logger.error(f"Disallowed parameters for curtain {left_over_parameters}, "
+                                             f"allowed parameters: {CURTAIN_PARAMETERS}")
+                            return False
+                        for key, value in new_device['parameters'].items():
+                            if key == 'position':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'position'",
+                                    cls=int,
+                                    value_range=(MIN_POSITION, MAX_POSITION),
+                                ):
+                                    return False
+                    case "air-conditioner":
+                        left_over_parameters -= AC_PARAMETERS
+                        if left_over_parameters != set():
+                            app.logger.error(f"Disallowed parameters for air conditioner {left_over_parameters}, "
+                                             f"allowed parameters: {AC_PARAMETERS}")
+                            return False
+                        for key, value in new_device['parameters'].items():
+                            if key == 'temperature':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'temperature'",
+                                    cls=int,
+                                    value_range=(MIN_AC_TEMP, MAX_AC_TEMP),
+                                ):
+                                    return False
+                            elif key == 'mode':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'mode'",
+                                    cls=str,
+                                    value_range=AC_MODES,
+                                ):
+                                    return False
+                            elif key == 'fan':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'fan'",
+                                    cls=str,
+                                    value_range=AC_FAN_SETTINGS,
+                                ):
+                                    return False
+                            elif key == 'swing':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'swing'",
+                                    cls=str,
+                                    value_range=AC_SWING_MODES,
+                                ):
+                                    return False
+                    case "water-heater":
+                        left_over_parameters -= WATER_HEATER_PARAMETERS
+                        if left_over_parameters != set():
+                            app.logger.error(f"Disallowed parameters for water heater {left_over_parameters}, "
+                                             f"allowed parameters: {WATER_HEATER_PARAMETERS}")
+                            return False
+                        for key, value in new_device['parameters'].items():
+                            if key == 'temperature':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'temperature'",
+                                    cls=int,
+                                    value_range=(MIN_WATER_TEMP, MAX_WATER_TEMP),
+                                ):
+                                    return False
+                            elif key == 'target_temperature':
+                                if not verify_type_and_range(
+                                        value=value,
+                                        name="'target_temperature'",
+                                        cls=int,
+                                        value_range=(MIN_WATER_TEMP, MAX_WATER_TEMP),
+                                ):
+                                    return False
+                            elif key == 'is_heating':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'is_heating'",
+                                    cls=bool,
+                                ):
+                                    return False
+                            elif key == 'timer_enabled':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'timer_enabled'",
+                                    cls=bool,
+                                ):
+                                    return False
+                            elif key == 'scheduled_on':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'scheduled_on'",
+                                    cls=str,
+                                    value_range='time'
+                                ):
+                                    return False
+                            elif key == 'scheduled_off':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'scheduled_off'",
+                                    cls=str,
+                                    value_range='time'
+                                ):
+                                    return False
+                    case "light":
+                        left_over_parameters -= LIGHT_PARAMETERS
+                        if left_over_parameters != set():
+                            app.logger.error(f"Disallowed parameters for door lock {left_over_parameters},"
+                                             f"allowed parameters: {LIGHT_PARAMETERS}")
+                            return False
+                        for key, value in new_device['parameters'].items():
+                            if key == 'brightness':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'brightness'",
+                                    cls=int,
+                                    value_range=(MIN_BRIGHTNESS, MAX_BRIGHTNESS),
+                                ):
+                                    return False
+                            elif key == 'color':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'color'",
+                                    cls=str,
+                                    value_range='color',
+                                ):
+                                    return False
+                            elif key == 'brightness':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'is_dimmable'",
+                                    cls=bool,
+                                ):
+                                    return False
+                            elif key == 'dynamic_color':
+                                if not verify_type_and_range(
+                                    value=value,
+                                    name="'dynamic_color'",
+                                    cls=bool,
+                                ):
+                                    return False
+
     return True
 
 
@@ -66,7 +393,7 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 # Database parameters
-uri = (
+uri = DB_CONNECTION_STRING if DB_CONNECTION_STRING is not None else (
         f"mongodb+srv://{username}:{password}" +
         "@smart-home-db.w9dsqtr.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-db"
 )
@@ -80,20 +407,20 @@ for attempt in range(RETRIES):
     try:
         mongo_client.admin.command('ping')
     except (ConnectionFailure, OperationFailure):
+        if attempt + 1 == RETRIES:
+            app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Shutting down.")
+            sys.exit(1)
         delay = 2 ** attempt + random.random()
-        app.logger.error(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
+        app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
         time.sleep(delay)
-
-try:
-    mongo_client.admin.command('ping')
-except ConnectionFailure:
-    app.logger.error("Failed to connect to database. Shutting down.")
-    sys.exit(1)
 
 db = mongo_client["smart_home"]
 devices_collection = db["devices"]
 
 mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2)
+
+# To track if the MQTT connection was successful
+connected_event = Event()
 
 
 # Function to run after the MQTT client finishes connecting to the broker
@@ -102,6 +429,9 @@ def on_connect(client, userdata, connect_flags, reason_code, properties):
     if reason_code == 0:
         app.logger.info("Connected successfully")
         client.subscribe("project/home/#")
+        connected_event.set()
+    else:
+        app.logger.error(f"Connection failed with code {reason_code}")
 
 
 # Verify that only parameters that are relevant to the device type are being
@@ -241,21 +571,30 @@ def on_message(mqtt_client, userdata, msg):
 
 mqtt.on_connect = on_connect
 mqtt.on_message = on_message
-
-for attempt in range(RETRIES):
-    try:
-        mqtt.connect(BROKER_URL, BROKER_PORT)
-    except Exception:
-        delay = 2 ** attempt + random.random()
-        app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
-        time.sleep(delay)
 mqtt.loop_start()
-time.sleep(3)
-if not mqtt.is_connected():
-    app.logger.error("Failed to connect to MQTT server. Shutting down.")
-    mongo_client.close()
-    mqtt.loop_stop()
-    sys.exit(1)
+
+# for attempt in range(RETRIES):
+#     try:
+#         connected_event.clear()
+#         mqtt.connect(BROKER_URL, BROKER_PORT)
+#         if connected_event.wait(timeout=RETRY_TIMEOUT):
+#             break  # Successfully connected
+#         else:
+#             raise TimeoutError("Connection timeout waiting for on_connect.")
+#     except Exception:
+#         if attempt + 1 == RETRIES:
+#             app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Shutting down.")
+#             mongo_client.close()
+#             mqtt.loop_stop()
+#             sys.exit(1)
+#         delay = 2 ** attempt + random.random()
+#         app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
+#         time.sleep(delay)
+# else:
+#     app.logger.error("Failed to connect to MQTT server. Shutting down.")
+#     mongo_client.close()
+#     mqtt.loop_stop()
+#     sys.exit(1)
 
 
 # Formats and publishes the mqtt topic and payload -> the mqtt publisher
