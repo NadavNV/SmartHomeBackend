@@ -76,11 +76,7 @@ def on_message(client, userdata, msg):
 
 client = mqtt.Client()
 client.on_message = on_message
-try:
-    client.connect("test.mosquitto.org", 1883, 60)
-except Exception as e:
-    print(f"Could not connect to MQTT broker: {e}")
-    sys.exit(1)
+client.connect("mqtt-broker", 1883, 60)
 client.subscribe("project/home/#")
 client.loop_start()
 
