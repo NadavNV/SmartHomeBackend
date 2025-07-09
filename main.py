@@ -73,17 +73,21 @@ uri = (
         "@smart-home-db.w9dsqtr.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-db"
 )
 try:
+    app.logger.info("Connecting to DB...")
     mongo_client = MongoClient(uri, server_api=ServerApi('1'))
 except ConfigurationError:
-    app.logger.error("Failed to connect to database. Shutting down.")
+    app.logger.exception("Failed to connect to database. Shutting down.")
     sys.exit(1)
 
 for attempt in range(RETRIES):
     try:
         mongo_client.admin.command('ping')
     except (ConnectionFailure, OperationFailure):
+        if attempt + 1 == RETRIES:
+            app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Shutting down.")
+            sys.exit(1)
         delay = 2 ** attempt + random.random()
-        app.logger.error(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
+        app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
         time.sleep(delay)
 
 try:
@@ -251,17 +255,19 @@ mqtt.on_connect = on_connect
 mqtt.on_disconnect = on_disconnect
 mqtt.on_message = on_message
 
+app.logger.info(f"Connecting to MQTT broker {BROKER_URL}:{BROKER_PORT}...")
 
-# Force connecting to MQTT broker via IPv4
-def get_ipv4_address(hostname):
-    for res in socket.getaddrinfo(hostname, None):
-        if res[0] == socket.AF_INET:  # IPv4
-            return res[4][0]
-    raise Exception(f"No IPv4 address found for {hostname}")
-
-
-broker_ip = get_ipv4_address(BROKER_URL)
-mqtt.connect_async(broker_ip, BROKER_PORT)
+# # Force connecting to MQTT broker via IPv4
+# def get_ipv4_address(hostname):
+#     app.logger.info(f"Forcing IPv4 for hostname {hostname}")
+#     for res in socket.getaddrinfo(hostname, None):
+#         if res[0] == socket.AF_INET:  # IPv4
+#             return res[4][0]
+#     raise Exception(f"No IPv4 address found for {hostname}")
+#
+#
+# broker_ip = get_ipv4_address(BROKER_URL)
+mqtt.connect_async(BROKER_URL, BROKER_PORT)
 mqtt.loop_start()
 
 
