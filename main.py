@@ -7,7 +7,6 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure
 from dotenv import load_dotenv
-from threading import Event
 import os
 import time
 import random
@@ -98,9 +97,6 @@ devices_collection = db["devices"]
 
 mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2)
 
-# To track if the MQTT connection was successful
-connected_event = Event()
-
 
 # Function to run after the MQTT client finishes connecting to the broker
 def on_connect(client, userdata, connect_flags, reason_code, properties):
@@ -108,14 +104,12 @@ def on_connect(client, userdata, connect_flags, reason_code, properties):
     if reason_code == 0:
         app.logger.info("Connected successfully")
         client.subscribe("project/home/#")
-        connected_event.set()
     else:
         app.logger.error(f"Connection failed with code {reason_code}")
 
 
 def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
     app.logger.warning(f"Disconnected from broker with reason: {reason_code}")
-    connected_event.clear()
 
 
 # Verify that only parameters that are relevant to the device type are being
@@ -268,29 +262,7 @@ def get_ipv4_address(hostname):
 
 broker_ip = get_ipv4_address(BROKER_URL)
 mqtt.loop_start()
-
-for attempt in range(RETRIES):
-    try:
-        connected_event.clear()
-        mqtt.connect_async(broker_ip, BROKER_PORT)
-        if connected_event.wait(timeout=RETRY_TIMEOUT):
-            break  # Successfully connected
-        else:
-            raise TimeoutError("Connection timeout waiting for on_connect.")
-    except Exception:
-        if attempt + 1 == RETRIES:
-            app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Shutting down.")
-            mongo_client.close()
-            mqtt.loop_stop()
-            sys.exit(1)
-        delay = 2 ** attempt + random.random()
-        app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
-        time.sleep(delay)
-else:
-    app.logger.error("Failed to connect to MQTT server. Shutting down.")
-    mongo_client.close()
-    mqtt.loop_stop()
-    sys.exit(1)
+mqtt.connect_async(broker_ip, BROKER_PORT)
 
 
 # Formats and publishes the mqtt topic and payload -> the mqtt publisher
