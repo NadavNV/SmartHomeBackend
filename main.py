@@ -113,6 +113,11 @@ def on_connect(client, userdata, connect_flags, reason_code, properties):
         app.logger.error(f"Connection failed with code {reason_code}")
 
 
+def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
+    app.logger.warning(f"Disconnected from broker with reason: {reason_code}")
+    connected_event.clear()
+
+
 # Verify that only parameters that are relevant to the device type are being
 # modified. For example, a light shouldn't have a target temperature and a
 # water heater shouldn't have a brightness.
@@ -249,6 +254,7 @@ def on_message(mqtt_client, userdata, msg):
 
 
 mqtt.on_connect = on_connect
+mqtt.on_disconnect = on_disconnect
 mqtt.on_message = on_message
 
 
@@ -266,7 +272,7 @@ mqtt.loop_start()
 for attempt in range(RETRIES):
     try:
         connected_event.clear()
-        mqtt.connect(broker_ip, BROKER_PORT)
+        mqtt.connect_async(broker_ip, BROKER_PORT)
         if connected_event.wait(timeout=RETRY_TIMEOUT):
             break  # Successfully connected
         else:
