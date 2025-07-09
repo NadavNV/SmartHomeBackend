@@ -7,6 +7,7 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure
 from dotenv import load_dotenv
+from threading import Event
 import os
 import time
 import random
@@ -38,6 +39,7 @@ password = os.getenv("MONGO_PASS")
 
 # How many times to attempt a connection request
 RETRIES = 5
+RETRY_TIMEOUT = 10
 
 # Setting up the MQTT client
 BROKER_URL = os.getenv("BROKER_URL", "test.mosquitto.org")
@@ -95,6 +97,9 @@ devices_collection = db["devices"]
 
 mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2)
 
+# To track if the MQTT connection was successful
+connected_event = Event()
+
 
 # Function to run after the MQTT client finishes connecting to the broker
 def on_connect(client, userdata, connect_flags, reason_code, properties):
@@ -102,6 +107,9 @@ def on_connect(client, userdata, connect_flags, reason_code, properties):
     if reason_code == 0:
         app.logger.info("Connected successfully")
         client.subscribe("project/home/#")
+        connected_event.set()
+    else:
+        app.logger.error(f"Connection failed with code {reason_code}")
 
 
 # Verify that only parameters that are relevant to the device type are being
@@ -241,17 +249,26 @@ def on_message(mqtt_client, userdata, msg):
 
 mqtt.on_connect = on_connect
 mqtt.on_message = on_message
+mqtt.loop_start()
 
 for attempt in range(RETRIES):
     try:
+        connected_event.clear()
         mqtt.connect(BROKER_URL, BROKER_PORT)
+        if connected_event.wait(timeout=RETRY_TIMEOUT):
+            break  # Successfully connected
+        else:
+            raise TimeoutError("Connection timeout waiting for on_connect.")
     except Exception:
+        if attempt + 1 == RETRIES:
+            app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Shutting down.")
+            mongo_client.close()
+            mqtt.loop_stop()
+            sys.exit(1)
         delay = 2 ** attempt + random.random()
         app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
         time.sleep(delay)
-mqtt.loop_start()
-time.sleep(3)
-if not mqtt.is_connected():
+else:
     app.logger.error("Failed to connect to MQTT server. Shutting down.")
     mongo_client.close()
     mqtt.loop_stop()
