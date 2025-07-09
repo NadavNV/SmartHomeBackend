@@ -12,6 +12,7 @@ import os
 import time
 import random
 import sys
+import socket
 import logging.handlers
 from prometheus_client import Counter, Histogram, generate_latest
 
@@ -249,12 +250,23 @@ def on_message(mqtt_client, userdata, msg):
 
 mqtt.on_connect = on_connect
 mqtt.on_message = on_message
+
+
+# Force connecting to MQTT broker via IPv4
+def get_ipv4_address(hostname):
+    for res in socket.getaddrinfo(hostname, None):
+        if res[0] == socket.AF_INET:  # IPv4
+            return res[4][0]
+    raise Exception(f"No IPv4 address found for {hostname}")
+
+
+broker_ip = get_ipv4_address(BROKER_URL)
 mqtt.loop_start()
 
 for attempt in range(RETRIES):
     try:
         connected_event.clear()
-        mqtt.connect(BROKER_URL, BROKER_PORT)
+        mqtt.connect(broker_ip, BROKER_PORT)
         if connected_event.wait(timeout=RETRY_TIMEOUT):
             break  # Successfully connected
         else:
