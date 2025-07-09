@@ -95,7 +95,7 @@ except ConnectionFailure:
 db = mongo_client["smart_home"]
 devices_collection = db["devices"]
 
-mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2)
+mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2, protocol=paho.MQTTv5)
 
 
 # Function to run after the MQTT client finishes connecting to the broker
@@ -261,8 +261,8 @@ def get_ipv4_address(hostname):
 
 
 broker_ip = get_ipv4_address(BROKER_URL)
-mqtt.loop_start()
 mqtt.connect_async(broker_ip, BROKER_PORT)
+mqtt.loop_start()
 
 
 # Formats and publishes the mqtt topic and payload -> the mqtt publisher
