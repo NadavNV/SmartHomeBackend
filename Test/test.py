@@ -28,13 +28,12 @@ grafana_test = False
 tests = 0
 total_test_num = 5
 
-def api_test(backend_url, data):
+def run_api_test(backend_url, data):
     response = requests.get(f"{backend_url}/api/devices")
     if 199 < response.status_code < 400:
         print("API is responding")
     else:
         print("API is not up")
-        error_list.append("API Backend")
         return False
 
     # Add a new test device
@@ -49,7 +48,6 @@ def api_test(backend_url, data):
             break
     else:
         print("Test device was not added properly")
-        error_list.append("API Backend")
         return False
 
     # delete Test Device
@@ -59,16 +57,18 @@ def api_test(backend_url, data):
     for device in output:
         if device["id"] == data["id"]:
             print("Test device was not deleted")
-            error_list.append("API Backend")
             return False
     else:
         print("Test device deleted successfully")
-        api_test = True
-        tests += 1
+        return True
 
 
 ### ---------- Test 1: API test ----------
-api_test(backend_url, data)
+if run_api_test(backend_url, data):
+    api_test = True
+    tests += 1
+else:
+    error_list.append("API Backend")
 
 ### ---------- Test 2: Frontend ----------
 response = requests.get(FRONTEND_URL)
@@ -122,7 +122,7 @@ if 199 < response.status_code < 400:
 else:
     print("Prometheus is not ready")
     error_list.append("Prometheus")
-    
+
 ### ---------- Test 5: Grafana ----------
 response = requests.get("http://grafana:3000/api/health")
 if 199 < response.status_code < 400:
