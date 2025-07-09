@@ -181,10 +181,10 @@ def validate_device_data(new_device):
                 match new_device['type']:
                     case "door_lock":
                         if not verify_type_and_range(
-                            value=new_device['status'],
-                            name="'status'",
-                            cls=str,
-                            value_range={'open', 'locked'},
+                                value=new_device['status'],
+                                name="'status'",
+                                cls=str,
+                                value_range={'open', 'locked'},
                         ):
                             return False
                     case "curtain":
@@ -206,9 +206,9 @@ def validate_device_data(new_device):
         if field == 'parameters':
             if 'type' in new_device and new_device['type'] in DEVICE_TYPES:
                 if not verify_type_and_range(
-                    value=new_device['parameters'],
-                    name="'parameters'",
-                    cls=dict,
+                        value=new_device['parameters'],
+                        name="'parameters'",
+                        cls=dict,
                 ):
                     return False
                 left_over_parameters = set(new_device['parameters'].keys())
@@ -222,17 +222,17 @@ def validate_device_data(new_device):
                         for key, value in new_device['parameters'].items():
                             if key == 'auto_lock_enabled':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'auto_lock_enabled'",
-                                    cls=bool,
+                                        value=value,
+                                        name="'auto_lock_enabled'",
+                                        cls=bool,
                                 ):
                                     return False
                             elif key == 'battery_level':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'battery_level'",
-                                    cls=int,
-                                    value_range=(MIN_BATTERY, MAX_BATTERY),
+                                        value=value,
+                                        name="'battery_level'",
+                                        cls=int,
+                                        value_range=(MIN_BATTERY, MAX_BATTERY),
                                 ):
                                     return False
                     case "curtain":
@@ -244,10 +244,10 @@ def validate_device_data(new_device):
                         for key, value in new_device['parameters'].items():
                             if key == 'position':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'position'",
-                                    cls=int,
-                                    value_range=(MIN_POSITION, MAX_POSITION),
+                                        value=value,
+                                        name="'position'",
+                                        cls=int,
+                                        value_range=(MIN_POSITION, MAX_POSITION),
                                 ):
                                     return False
                     case "air-conditioner":
@@ -259,34 +259,34 @@ def validate_device_data(new_device):
                         for key, value in new_device['parameters'].items():
                             if key == 'temperature':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'temperature'",
-                                    cls=int,
-                                    value_range=(MIN_AC_TEMP, MAX_AC_TEMP),
+                                        value=value,
+                                        name="'temperature'",
+                                        cls=int,
+                                        value_range=(MIN_AC_TEMP, MAX_AC_TEMP),
                                 ):
                                     return False
                             elif key == 'mode':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'mode'",
-                                    cls=str,
-                                    value_range=AC_MODES,
+                                        value=value,
+                                        name="'mode'",
+                                        cls=str,
+                                        value_range=AC_MODES,
                                 ):
                                     return False
                             elif key == 'fan':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'fan'",
-                                    cls=str,
-                                    value_range=AC_FAN_SETTINGS,
+                                        value=value,
+                                        name="'fan'",
+                                        cls=str,
+                                        value_range=AC_FAN_SETTINGS,
                                 ):
                                     return False
                             elif key == 'swing':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'swing'",
-                                    cls=str,
-                                    value_range=AC_SWING_MODES,
+                                        value=value,
+                                        name="'swing'",
+                                        cls=str,
+                                        value_range=AC_SWING_MODES,
                                 ):
                                     return False
                     case "water-heater":
@@ -298,10 +298,10 @@ def validate_device_data(new_device):
                         for key, value in new_device['parameters'].items():
                             if key == 'temperature':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'temperature'",
-                                    cls=int,
-                                    value_range=(MIN_WATER_TEMP, MAX_WATER_TEMP),
+                                        value=value,
+                                        name="'temperature'",
+                                        cls=int,
+                                        value_range=(MIN_WATER_TEMP, MAX_WATER_TEMP),
                                 ):
                                     return False
                             elif key == 'target_temperature':
@@ -314,32 +314,32 @@ def validate_device_data(new_device):
                                     return False
                             elif key == 'is_heating':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'is_heating'",
-                                    cls=bool,
+                                        value=value,
+                                        name="'is_heating'",
+                                        cls=bool,
                                 ):
                                     return False
                             elif key == 'timer_enabled':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'timer_enabled'",
-                                    cls=bool,
+                                        value=value,
+                                        name="'timer_enabled'",
+                                        cls=bool,
                                 ):
                                     return False
                             elif key == 'scheduled_on':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'scheduled_on'",
-                                    cls=str,
-                                    value_range='time'
+                                        value=value,
+                                        name="'scheduled_on'",
+                                        cls=str,
+                                        value_range='time'
                                 ):
                                     return False
                             elif key == 'scheduled_off':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'scheduled_off'",
-                                    cls=str,
-                                    value_range='time'
+                                        value=value,
+                                        name="'scheduled_off'",
+                                        cls=str,
+                                        value_range='time'
                                 ):
                                     return False
                     case "light":
@@ -351,32 +351,32 @@ def validate_device_data(new_device):
                         for key, value in new_device['parameters'].items():
                             if key == 'brightness':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'brightness'",
-                                    cls=int,
-                                    value_range=(MIN_BRIGHTNESS, MAX_BRIGHTNESS),
+                                        value=value,
+                                        name="'brightness'",
+                                        cls=int,
+                                        value_range=(MIN_BRIGHTNESS, MAX_BRIGHTNESS),
                                 ):
                                     return False
                             elif key == 'color':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'color'",
-                                    cls=str,
-                                    value_range='color',
+                                        value=value,
+                                        name="'color'",
+                                        cls=str,
+                                        value_range='color',
                                 ):
                                     return False
                             elif key == 'brightness':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'is_dimmable'",
-                                    cls=bool,
+                                        value=value,
+                                        name="'is_dimmable'",
+                                        cls=bool,
                                 ):
                                     return False
                             elif key == 'dynamic_color':
                                 if not verify_type_and_range(
-                                    value=value,
-                                    name="'dynamic_color'",
-                                    cls=bool,
+                                        value=value,
+                                        name="'dynamic_color'",
+                                        cls=bool,
                                 ):
                                     return False
 
@@ -573,28 +573,28 @@ mqtt.on_connect = on_connect
 mqtt.on_message = on_message
 mqtt.loop_start()
 
-# for attempt in range(RETRIES):
-#     try:
-#         connected_event.clear()
-#         mqtt.connect(BROKER_URL, BROKER_PORT)
-#         if connected_event.wait(timeout=RETRY_TIMEOUT):
-#             break  # Successfully connected
-#         else:
-#             raise TimeoutError("Connection timeout waiting for on_connect.")
-#     except Exception:
-#         if attempt + 1 == RETRIES:
-#             app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Shutting down.")
-#             mongo_client.close()
-#             mqtt.loop_stop()
-#             sys.exit(1)
-#         delay = 2 ** attempt + random.random()
-#         app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
-#         time.sleep(delay)
-# else:
-#     app.logger.error("Failed to connect to MQTT server. Shutting down.")
-#     mongo_client.close()
-#     mqtt.loop_stop()
-#     sys.exit(1)
+for attempt in range(RETRIES):
+    try:
+        connected_event.clear()
+        mqtt.connect(BROKER_URL, BROKER_PORT)
+        if connected_event.wait(timeout=RETRY_TIMEOUT):
+            break  # Successfully connected
+        else:
+            raise TimeoutError("Connection timeout waiting for on_connect.")
+    except Exception:
+        if attempt + 1 == RETRIES:
+            app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Shutting down.")
+            mongo_client.close()
+            mqtt.loop_stop()
+            sys.exit(1)
+        delay = 2 ** attempt + random.random()
+        app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
+        time.sleep(delay)
+else:
+    app.logger.error("Failed to connect to MQTT server. Shutting down.")
+    mongo_client.close()
+    mqtt.loop_stop()
+    sys.exit(1)
 
 
 # Formats and publishes the mqtt topic and payload -> the mqtt publisher
