@@ -47,7 +47,7 @@ RETRY_TIMEOUT = 10
 BROKER_URL = os.getenv("BROKER_URL", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 
-PROMETHEUS_URL = "http://smart-home-prometheus-svc.smart-home.svc.cluster.local:9090"
+PROMETHEUS_URL = "http://prometheus-svc.smart-home.svc.cluster.local:9090"
 # Prometheus metrics
 # HTTP request metrics
 request_count = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
