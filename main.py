@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
-from typing import Union, Any, List, Dict
+from typing import Union, Any, List, Dict, Mapping
 import paho.mqtt.client as paho
 import json
 import atexit
@@ -54,33 +54,114 @@ request_count = Counter('request_count', 'Total Request Count', ['method', 'endp
 request_latency = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
 
 # Device metrics
-device_status = Gauge("device_status", "Device on/off state", ["device_id", "device_type", "device_name"])
-device_usage_seconds_total = Gauge("device_usage_seconds_total", "Cumulative usage",
-                                   ["device_id", "device_type", "device_name"])
-device_on_events = Counter("device_on_events_total", "Number of times device turned on",
-                           ["device_id", "device_type", "device_name"])
-device_usage_seconds = Counter("device_usage_seconds_total", "Total on-time in seconds",
-                               ["device_id", "device_type", "device_name"])
-ac_temperature = Gauge("ac_temperature", "Current temperature (AC)", ["device_id", "device_type", "device_name"])
+device_metadata = Gauge("device_metadata", "Key/Value device Metadata", ["device_id", "key", "value"])
+device_status = Gauge("device_status", "Device on/off state", ["device_id", "device_type"])
+device_on_events = Counter("device_on_events", "Number of times device turned on",
+                           ["device_id", "device_type", ])
+device_usage_seconds = Counter("device_usage_seconds", "Total on-time in seconds",
+                               ["device_id", "device_type"])
+# Air conditioner
+ac_temperature = Gauge("ac_temperature", "Current temperature (AC)", ["device_id"])
 ac_mode_status = Gauge("ac_mode_status", "Current active mode of air conditioners",
-                       ["device_id", "device_name", "mode"])
+                       ["device_id", "mode"])
 ac_swing_status = Gauge("ac_swing_status", "Current swing mode of air conditioners",
-                        ["device_id", "device_name", "mode"])
+                        ["device_id", "mode"])
 ac_fan_status = Gauge("ac_fan_status", "Current fan mode of air conditioners",
-                      ["device_id", "device_name", "mode"])
+                      ["device_id", "mode"])
+# Water heater
 water_heater_temperature = Gauge("water_heater_temperature", "Current temperature (water heater)",
-                                 ["device_id", "device_type", "device_name"])
+                                 ["device_id"])
 water_heater_target_temperature = Gauge("water_heater_target_temperature", "Target temperature",
-                                        ["device_id", "device_type", "device_name"])
+                                        ["device_id"])
 water_heater_is_heating_status = Gauge("water_heater_is_heating_status", "Water heater is heating",
-                                       ["device_id", "device_type", "device_name"])
+                                       ["device_id", "state"])
 water_heater_timer_enabled_status = Gauge("water_heater_is_heating_status", "Water heater timer enabled",
-                                          ["device_id", "device_type", "device_name"])
+                                          ["device_id", "state"])
 water_heater_schedule_info = Gauge("water_heater_schedule_info", "Water heater schedule info",
-                                   ["device_id", "device_type", "device_name", "scheduled_on", "scheduled_off"])
+                                   ["device_id", "scheduled_on", "scheduled_off"])
+# Light
+light_brightness = Gauge("light_brightness", "Current light brightness",
+                         ["device_id", "is_dimmable"])
+light_color = Gauge("light_color", "Current light color as decimal RGB",
+                    ["device_id", "dynamic_color"])
+light_color_info = Gauge("light_color_info", "Current light color as label",
+                         ["device_id", "dynamic_color", "color"])
+# Door lock
+lock_status = Gauge("lock_status", "Locked/unlocked status", ["device_id", "state"])
+auto_lock_enabled = Gauge("auto_lock_enabled", "Auto-lock enabled",
+                          ["device_id", "state"])
+lock_battery_level = Gauge("lock_battery_level", "Battery level", ["device_id"])
+# Curtain
+curtain_status = Gauge("curtain_status", "Open/closed status", ["device_id", "state"])
 
 # For tracking usage
-device_on_timestamps = {}
+device_on_timestamps: dict[str, datetime] = {}
+seen_devices: set[dict] = set()
+
+
+def mark_device_read(device: Mapping[str, Any]):
+    device_id = device.get("id")
+    if device_id and device_id not in seen_devices:
+        seen_devices.add(device_id)
+        app.logger.debug(f"Device {device_id} read from DB for the first time")
+        app.logger.debug(f"Adding metrics for device {device_id}")
+        for key, value in device.items():
+            if key != "parameters" and key != "id":
+                app.logger.debug(f"Device {device_id} key {key} value {value}")
+                update_device_metrics(device, device)
+        for key, value in device["parameters"].items():
+            device_metrics_action(device, key, value)
+
+
+def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
+    # For binary states, determine the two options
+    known_states = {
+        "on": "off",
+        "off": "on",
+        "locked": "unlocked",
+        "unlocked": "locked",
+        "open": "closed",
+        "closed": "open",
+    }
+
+    other_state = known_states.get(new_status, None)
+    if not other_state:
+        app.logger.warning(f"Unknown binary state: {new_status}")
+        return
+
+    if new_status == "on" and device["status"] == "off":
+        device_on_timestamps[device["id"]] = datetime.now()
+        device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
+
+    if new_status == "off" and device["status"] == "on":
+        last_on_time = device_on_timestamps.get(device["id"], None)
+        if last_on_time:
+            duration = (datetime.now() - last_on_time).total_seconds()
+            device_usage_seconds.labels(
+                device_id=device["id"],
+                device_type=device["type"],
+            ).inc(duration)
+
+    device_status.labels(
+        device_id=device["id"],
+        device_type=device["type"],
+    ).set(1 if new_status in {"on", "locked", "closed"} else 0)
+
+
+def flip_device_boolean_flag(metric: Gauge, device_id: str, flag: str, new_value: bool) -> bool:
+    if new_value is True or new_value is False:
+        metric.labels(
+            device_id=device_id,
+            state=str(new_value),
+        ).set(1)
+        metric.labels(
+            device_id=device_id,
+            state=str(not new_value),
+        ).set(0)
+        return True
+    else:
+        app.logger.error(f"Unsupported value '{new_value}' for parameter '{flag}'")
+        return False
 
 
 # Validates that the request data contains all the required fields
@@ -195,6 +276,129 @@ def validate_action_parameters(device_type: str, updated_parameters: dict) -> bo
     return True
 
 
+def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tuple[bool, str | None]:
+    # Update metrics
+    match device["type"]:
+        case "water_heater":
+            match key:
+                case "temperature":
+                    water_heater_temperature.labels(
+                        device_id=device["id"],
+                    ).set(value)
+                case "target_temperature":
+                    water_heater_target_temperature.labels(
+                        device_id=device["id"],
+                    ).set(value)
+                case "is_heating":
+                    if not flip_device_boolean_flag(
+                            metric=water_heater_is_heating_status,
+                            new_value=value,
+                            device_id=device["id"],
+                            flag=key,
+                    ):
+                        return False, f"Unsupported value '{value}' for parameter '{key}'"
+                case "timer_enabled":
+                    if not flip_device_boolean_flag(
+                            metric=water_heater_timer_enabled_status,
+                            new_value=value,
+                            device_id=device["id"],
+                            flag=key,
+                    ):
+                        return False, f"Unsupported value '{value}' for parameter '{key}'"
+                case "scheduled_on":
+                    water_heater_schedule_info.labels(
+                        device_id=device["id"],
+                        scheduled_on=value,
+                        scheduled_off=device["scheduled_off"],
+                    ).set(1)
+                case "scheduled_off":
+                    water_heater_schedule_info.labels(
+                        device_id=device["id"],
+                        scheduled_on=device["scheduled_on"],
+                        scheduled_off=value,
+                    )
+                case _:
+                    app.logger.error(f"Unknown parameter '{key}'")
+                    return False, f"Unknown parameter '{key}'"
+        case "light":
+            match key:
+                case "brightness":
+                    light_brightness.labels(
+                        device_id=device["id"],
+                        device_type=device["type"],
+                        is_dimmable=str(device["parameters"]["is_dimmable"]),
+                    ).set(value)
+                case "color":
+                    try:
+                        light_color.labels(
+                            device_id=device["id"],
+                            device_type=device["type"],
+                            dynamic_color=str(device["parameters"]["dynamic_color"]),
+                        ).set(int("0x" + value[1:]))
+                    except (KeyError, ValueError):
+                        app.logger.exception(f"Incorrect color string '{value}'")
+                case "is_dimmable" | "dynamic_color":
+                    # Read-only parameter, not tracking in metrics
+                    pass
+                case _:
+                    app.logger.error(f"Unknown parameter '{key}'")
+                    return False, f"Unknown parameter '{key}'"
+        case "air_conditioner":
+            match key:
+                case "temperature":
+                    ac_temperature.labels(
+                        device_id=device["id"],
+                    ).set(value)
+                case "mode":
+                    modes = ["cool", "heat", "fan"]
+                    for mode in modes:
+                        ac_mode_status.labels(
+                            device_id=device["id"],
+                            mode=mode,
+                        ).set(1 if mode == value else 0)
+                case "fan_speed":
+                    modes = ["off", "low", "medium", "high"]
+                    for mode in modes:
+                        ac_fan_status.labels(
+                            device_id=device["id"],
+                            mode=value,
+                        ).set(1 if mode == value else 0)
+                case "swing":
+                    modes = ["off", "on", "auto"]
+                    for mode in modes:
+                        ac_swing_status.labels(
+                            device_id=device["id"],
+                            mode=value,
+                        ).set(1 if mode == value else 0)
+                case _:
+                    app.logger.error(f"Unknown parameter '{key}'")
+                    return False, f"Unknown parameter '{key}'"
+        case "door_lock":
+            match key:
+                case "auto_lock_enabled":
+                    # Read-only parameter, not tracked in metrics
+                    pass
+                case "battery_level":
+                    lock_battery_level.labels(
+                        device_id=device["id"],
+                    ).set(value)
+                case _:
+                    app.logger.error(f"Unknown parameter '{key}'")
+                    return False, f"Unknown parameter '{key}'"
+        case "curtain":
+            match key:
+                case "position":
+                    # Read-only parameter, not tracked in metrics
+                    pass
+                case _:
+                    app.logger.error(f"Unknown parameter '{key}'")
+                    return False, f"Unknown parameter '{key}'"
+        case _:
+            app.logger.error(f"Unknown device type '{device['type']}'")
+            return False, f"Unknown device type '{device['type']}'"
+    return True, None
+
+
 # Receives the published mqtt payloads and updates the database accordingly
 def on_message(mqtt_client, userdata, msg):
     app.logger.info(f"MQTT Message Received on {msg.topic}")
@@ -228,8 +432,10 @@ def on_message(mqtt_client, userdata, msg):
                     update_fields = {}
                     for key, value in payload.items():
                         app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-                        field_name = f"parameters.{key}"
-                        update_fields[field_name] = value
+                        success, reason = device_metrics_action(device, key, value)
+                        if not success:
+                            return
+                        update_fields[f"parameters.{key}"] = value
                     devices_collection.update_one(
                         {"id": device_id},
                         {"$set": update_fields}
@@ -246,8 +452,7 @@ def on_message(mqtt_client, userdata, msg):
                         if field not in allowed_fields:
                             app.logger.error(f"Incorrect field in update method: {field}")
                             return
-                    for key, value in payload.items():
-                        app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+                    update_device_metrics(device, payload)
                     # Find device by id and update the fields with 'set'
                     devices_collection.update_one(
                         {"id": device_id},
@@ -263,6 +468,7 @@ def on_message(mqtt_client, userdata, msg):
                         if id_exists(payload["id"]):
                             app.logger.error("ID already exists")
                             return
+                        mark_device_read(payload)
                         devices_collection.insert_one(payload)
                         app.logger.info("Device added successfully")
                         return
@@ -271,6 +477,9 @@ def on_message(mqtt_client, userdata, msg):
                 case "delete":
                     # Remove a device from the database
                     if id_exists(device_id):
+                        if device["status"] == "on":
+                            # Calculate device usage, etc.
+                            update_binary_device_status(device, "off")
                         devices_collection.delete_one({"id": device_id})
                         app.logger.info("Device deleted successfully")
                         return
@@ -291,16 +500,6 @@ mqtt.on_message = on_message
 
 app.logger.info(f"Connecting to MQTT broker {BROKER_URL}:{BROKER_PORT}...")
 
-# # Force connecting to MQTT broker via IPv4
-# def get_ipv4_address(hostname):
-#     app.logger.info(f"Forcing IPv4 for hostname {hostname}")
-#     for res in socket.getaddrinfo(hostname, None):
-#         if res[0] == socket.AF_INET:  # IPv4
-#             return res[4][0]
-#     raise Exception(f"No IPv4 address found for {hostname}")
-#
-#
-# broker_ip = get_ipv4_address(BROKER_URL)
 mqtt.connect_async(BROKER_URL, BROKER_PORT)
 mqtt.loop_start()
 
@@ -336,6 +535,10 @@ def get_device_ids():
 @app.get("/api/devices")
 def get_all_devices():
     devices = list(devices_collection.find({}, {'_id': 0}))
+    for device in devices:
+        if "id" in device:
+            if device["id"] not in seen_devices:
+                mark_device_read(device)
     return jsonify(devices)
 
 
@@ -343,6 +546,9 @@ def get_all_devices():
 @app.get("/api/devices/<device_id>")
 def get_device(device_id):
     device = devices_collection.find_one({'id': device_id}, {'_id': 0})
+    if "id" in device:
+        if device["id"] not in seen_devices:
+            mark_device_read(device)
     if device is not None:
         return jsonify(device)
     app.logger.error(f"ID {device_id} not found")
@@ -357,6 +563,7 @@ def add_device():
         if id_exists(new_device["id"]):
             return jsonify({'error': "ID already exists"}), 400
         devices_collection.insert_one(new_device)
+        mark_device_read(new_device)
         # Remove MongoDB unique id (_id) before publishing to mqtt
         new_device.pop("_id", None)
         publish_mqtt(
@@ -372,6 +579,7 @@ def add_device():
 @app.delete("/api/devices/<device_id>")
 def delete_device(device_id):
     if id_exists(device_id):
+        seen_devices.remove(device_id)  # Allows adding a new device with old id
         devices_collection.delete_one({"id": device_id})
         # new_device.pop("_id", None)
         publish_mqtt(
@@ -381,6 +589,28 @@ def delete_device(device_id):
         )
         return jsonify({"output": "Device was deleted from the database"}), 200
     return jsonify({"error": "ID not found"}), 404
+
+
+def update_device_metrics(old_device: Mapping[str, Any], updated_device: Mapping[str, Any]) -> None:
+    for key, value in updated_device.items():
+        app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+        match key:
+            case "name" | "room":
+                # Mark old metadata stale, set new data valid
+                # If it's the same value, it's set to 0 then
+                # back to 1 immediately
+                device_metadata.labels(
+                    device_id=old_device["id"],
+                    key=key,
+                    value=old_device[key],
+                ).set(0)
+                device_metadata.labels(
+                    device_id=old_device["id"],
+                    key=key,
+                    value=value,
+                ).set(1)
+            case "status":
+                update_binary_device_status(old_device, value)
 
 
 # Changes a device configuration (i.e. name, room, or status) or adds a new configuration
@@ -400,8 +630,8 @@ def update_device(device_id):
             return jsonify({'error': f"Incorrect field in update endpoint: {field}"}), 400
     if id_exists(device_id):
         app.logger.info(f"Updating device {device_id}")
-        for key, value in updated_device.items():
-            app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+        device = devices_collection.find_one({'id': device_id}, {'_id': 0})
+        update_device_metrics(device, updated_device)
         # Find device by id and update the fields with 'set'
         devices_collection.update_one(
             {"id": device_id},
@@ -432,6 +662,9 @@ def rt_action(device_id):
     update_fields = {}
     for key, value in action.items():
         app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+        success, reason = device_metrics_action(device, key, value)
+        if not success:
+            return jsonify({'error': reason}), 400
         update_fields[f"parameters.{key}"] = value
     devices_collection.update_one(
         {"id": device_id},
@@ -482,6 +715,16 @@ def query_prometheus(query) -> Union[List[Dict[str, Any]], Dict[str, str]]:
 
 @app.get("/api/devices/analytics")
 def device_analytics():
+    on_devices = devices_collection.find({"status": "on"}, {'_id': 0})
+    for device in on_devices:
+        last_on_time = device_on_timestamps.get(device["id"], None)
+        if last_on_time:
+            duration = (datetime.now() - last_on_time).total_seconds()
+            device_usage_seconds.labels(
+                device_id=device["id"],
+                device_type=device["type"],
+            ).inc(duration)
+            device_on_timestamps[device["id"]] = datetime.now()
     try:
         body = request.get_json(silent=True) or {}
         app.logger.debug(f"Received analytics request body: {body}")
