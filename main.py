@@ -75,7 +75,7 @@ water_heater_target_temperature = Gauge("water_heater_target_temperature", "Targ
                                         ["device_id"])
 water_heater_is_heating_status = Gauge("water_heater_is_heating_status", "Water heater is heating",
                                        ["device_id", "state"])
-water_heater_timer_enabled_status = Gauge("water_heater_is_heating_status", "Water heater timer enabled",
+water_heater_timer_enabled_status = Gauge("water_heater_timer_enabled_status", "Water heater timer enabled",
                                           ["device_id", "state"])
 water_heater_schedule_info = Gauge("water_heater_schedule_info", "Water heater schedule info",
                                    ["device_id", "scheduled_on", "scheduled_off"])
