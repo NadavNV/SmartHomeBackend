@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
+from typing import Union, Any, List, Dict
 import paho.mqtt.client as paho
 import json
 import atexit
@@ -7,13 +8,14 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure
 from dotenv import load_dotenv
+from datetime import datetime, timedelta, UTC
 import os
 import time
 import random
 import sys
-import socket
+import requests
 import logging.handlers
-from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import Gauge, Counter, Histogram, generate_latest
 
 logging.basicConfig(
     format="[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
@@ -45,8 +47,40 @@ RETRY_TIMEOUT = 10
 BROKER_URL = os.getenv("BROKER_URL", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 
-REQUEST_COUNT = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
-REQUEST_LATENCY = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
+PROMETHEUS_URL = "http://smart-home-prometheus-svc.smart-home.svc.cluster.local:9090"
+# Prometheus metrics
+# HTTP request metrics
+request_count = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
+request_latency = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
+
+# Device metrics
+device_status = Gauge("device_status", "Device on/off state", ["device_id", "device_type", "device_name"])
+device_usage_seconds_total = Gauge("device_usage_seconds_total", "Cumulative usage",
+                                   ["device_id", "device_type", "device_name"])
+device_on_events = Counter("device_on_events_total", "Number of times device turned on",
+                           ["device_id", "device_type", "device_name"])
+device_usage_seconds = Counter("device_usage_seconds_total", "Total on-time in seconds",
+                               ["device_id", "device_type", "device_name"])
+ac_temperature = Gauge("ac_temperature", "Current temperature (AC)", ["device_id", "device_type", "device_name"])
+ac_mode_status = Gauge("ac_mode_status", "Current active mode of air conditioners",
+                       ["device_id", "device_name", "mode"])
+ac_swing_status = Gauge("ac_swing_status", "Current swing mode of air conditioners",
+                        ["device_id", "device_name", "mode"])
+ac_fan_status = Gauge("ac_fan_status", "Current fan mode of air conditioners",
+                      ["device_id", "device_name", "mode"])
+water_heater_temperature = Gauge("water_heater_temperature", "Current temperature (water heater)",
+                                 ["device_id", "device_type", "device_name"])
+water_heater_target_temperature = Gauge("water_heater_target_temperature", "Target temperature",
+                                        ["device_id", "device_type", "device_name"])
+water_heater_is_heating_status = Gauge("water_heater_is_heating_status", "Water heater is heating",
+                                       ["device_id", "device_type", "device_name"])
+water_heater_timer_enabled_status = Gauge("water_heater_is_heating_status", "Water heater timer enabled",
+                                          ["device_id", "device_type", "device_name"])
+water_heater_schedule_info = Gauge("water_heater_schedule_info", "Water heater schedule info",
+                                   ["device_id", "device_type", "device_name", "scheduled_on", "scheduled_off"])
+
+# For tracking usage
+device_on_timestamps = {}
 
 
 # Validates that the request data contains all the required fields
@@ -433,14 +467,79 @@ def ready_check():
         return jsonify({"Status": "Not ready"}), 500
 
 
+def query_prometheus(query) -> Union[List[Dict[str, Any]], Dict[str, str]]:
+    try:
+        app.logger.debug(f"Querying Prometheus: {query}")
+        resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        app.logger.debug(f"Prometheus response for query '{query}': {data}")
+        return data.get("data", {}).get("result", [])
+    except requests.RequestException as e:
+        app.logger.exception(f"Error querying Prometheus for query '{query}'")
+        return {"error": str(e)}
+
+
+@app.get("/api/devices/analytics")
+def device_analytics():
+    try:
+        body = request.get_json(silent=True) or {}
+        app.logger.debug(f"Received analytics request body: {body}")
+
+        now = datetime.now(UTC)
+        week_ago = now - timedelta(days=7)
+
+        usage_results = query_prometheus("device_usage_seconds_total")
+        event_results = query_prometheus("device_on_events_total")
+
+        if isinstance(usage_results, dict) and "error" in usage_results:
+            app.logger.error(f"Prometheus usage query failed: {usage_results['error']}")
+            return jsonify({"error": "Failed to query Prometheus", "details": usage_results["error"]}), 500
+
+        device_analytics_json = {}
+
+        for item in usage_results:
+            device_id = item["metric"].get("device_id", "unknown")
+            usage_seconds = float(item["value"][1])
+            device_analytics_json.setdefault(device_id, {})["total_usage_minutes"] = usage_seconds / 60
+
+        for item in event_results:
+            device_id = item["metric"].get("device_id", "unknown")
+            on_count = int(float(item["value"][1]))
+            device_analytics_json.setdefault(device_id, {})["on_events"] = on_count
+
+        total_usage = sum(d.get("total_usage_minutes", 0) for d in device_analytics_json.values())
+        total_on_events = sum(d.get("on_events", 0) for d in device_analytics_json.values())
+
+        response = {
+            "analytics_window": {
+                "from": week_ago.isoformat(),
+                "to": now.isoformat()
+            },
+            "aggregate": {
+                "total_devices": len(device_analytics_json),
+                "total_on_events": total_on_events,
+                "total_usage_minutes": total_usage
+            },
+            "devices": device_analytics_json
+        }
+
+        app.logger.debug(f"Returning analytics response: {response}")
+        return jsonify(response)
+
+    except Exception as e:
+        app.logger.exception("Unexpected error in /api/devices/analytics")
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+
 # Adds required headers to the response
 @app.after_request
 def after_request_combined(response):
     # Prometheus tracking
     if hasattr(request, 'start_time'):
         duration = time.time() - request.start_time
-        REQUEST_COUNT.labels(request.method, request.path).inc()
-        REQUEST_LATENCY.labels(request.path).observe(duration)
+        request_count.labels(request.method, request.path).inc()
+        request_latency.labels(request.path).observe(duration)
 
     # CORS headers
     if request.method == 'OPTIONS':
