@@ -103,11 +103,11 @@ def mark_device_read(device: Mapping[str, Any]):
     device_id = device.get("id")
     if device_id and device_id not in seen_devices:
         seen_devices.add(device_id)
-        app.logger.debug(f"Device {device_id} read from DB for the first time")
-        app.logger.debug(f"Adding metrics for device {device_id}")
+        app.logger.info(f"Device {device_id} read from DB for the first time")
+        app.logger.info(f"Adding metrics for device {device_id}")
         for key, value in device.items():
             if key != "parameters" and key != "id":
-                app.logger.debug(f"Device {device_id} key {key} value {value}")
+                app.logger.info(f"Device {device_id} key {key} value {value}")
                 update_device_metrics(device, device)
         for key, value in device["parameters"].items():
             device_metrics_action(device, key, value)
@@ -131,9 +131,11 @@ def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
 
     if new_status == "on" and (device["id"] not in seen_devices or device["status"] == "off"):
         device_on_intervals.setdefault(device["id"], []).append([datetime.now(), None])
+        app.logger.info(f"Created new device interval: {device_on_intervals[device["id"]]}")
         device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
 
     if new_status == "off" and device["status"] == "on":
+        app.logger.info(f"Closing device interval: {device_on_intervals[device["id"]]}")
         last_on_interval = device_on_intervals[device["id"]][-1]
         last_on_time = last_on_interval[0]
         last_on_interval[1] = datetime.now()
