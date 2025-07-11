@@ -9,12 +9,13 @@ backend_url = os.getenv("BACKEND_URL", "http://localhost:5200")
 
 data = {
     "id": "test-device",
-    "type": "test_device",
+    "type": "light",
     "name": "Test Device",
     "room": "Test",
     "status": "off",
     "parameters": {
-        "test": 40
+        "is_dimmable": False,
+        "dynamic_color": False,
     }
 }
 
@@ -27,6 +28,7 @@ prom_test = False
 grafana_test = False
 tests = 0
 total_test_num = 5
+
 
 def run_api_test(backend_url, data):
     response = requests.get(f"{backend_url}/api/devices")
@@ -83,11 +85,13 @@ else:
 ### ---------- Test 3: MQTT Simulator----------
 mqtt_message_received = False
 
+
 def on_message(client, userdata, msg):
     global mqtt_message_received
     print(f"MQTT message received on topic: {msg.topic}")
     mqtt_message_received = True
     client.disconnect()  # Stop loop after receiving
+
 
 client = mqtt.Client()
 client.on_message = on_message
@@ -98,7 +102,7 @@ client.loop_start()
 print("Waiting up to 10 seconds for simulator MQTT message...")
 
 # Wait up to 30 seconds for message
-for _ in range(30): 
+for _ in range(30):
     if mqtt_message_received:
         break
     time.sleep(1)
