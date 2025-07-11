@@ -129,7 +129,7 @@ def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
         app.logger.warning(f"Unknown binary state: {new_status}")
         return
 
-    if new_status == "on" and (device not in seen_devices or device["status"] == "off"):
+    if new_status == "on" and (device["id"] not in seen_devices or device["status"] == "off"):
         device_on_intervals.setdefault(device["id"], []).append([datetime.now(), None])
         device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
 
