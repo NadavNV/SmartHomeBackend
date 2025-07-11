@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
-from typing import Union, Any, List, Dict, Mapping
+from typing import Union, Any, Mapping
 import paho.mqtt.client as paho
 import json
 import atexit
@@ -47,7 +47,7 @@ RETRY_TIMEOUT = 10
 BROKER_URL = os.getenv("BROKER_URL", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 
-PROMETHEUS_URL = "http://smart-home-prometheus-svc.smart-home.svc.cluster.local:9090"
+PROMETHEUS_URL = "http://prometheus-svc.smart-home.svc.cluster.local:9090"
 # Prometheus metrics
 # HTTP request metrics
 request_count = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
@@ -75,7 +75,7 @@ water_heater_target_temperature = Gauge("water_heater_target_temperature", "Targ
                                         ["device_id"])
 water_heater_is_heating_status = Gauge("water_heater_is_heating_status", "Water heater is heating",
                                        ["device_id", "state"])
-water_heater_timer_enabled_status = Gauge("water_heater_is_heating_status", "Water heater timer enabled",
+water_heater_timer_enabled_status = Gauge("water_heater_timer_enabled_status", "Water heater timer enabled",
                                           ["device_id", "state"])
 water_heater_schedule_info = Gauge("water_heater_schedule_info", "Water heater schedule info",
                                    ["device_id", "scheduled_on", "scheduled_off"])
@@ -95,7 +95,7 @@ lock_battery_level = Gauge("lock_battery_level", "Battery level", ["device_id"])
 curtain_status = Gauge("curtain_status", "Open/closed status", ["device_id", "state"])
 
 # For tracking usage
-device_on_timestamps: dict[str, datetime] = {}
+device_on_intervals: dict[str, list[list[datetime | None]]] = {}
 seen_devices: set[dict] = set()
 
 
@@ -130,22 +130,34 @@ def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
         return
 
     if new_status == "on" and device["status"] == "off":
-        device_on_timestamps[device["id"]] = datetime.now()
+        device_on_intervals.setdefault(device["id"], []).append([datetime.now(), None])
         device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
 
     if new_status == "off" and device["status"] == "on":
-        last_on_time = device_on_timestamps.get(device["id"], None)
-        if last_on_time:
-            duration = (datetime.now() - last_on_time).total_seconds()
-            device_usage_seconds.labels(
-                device_id=device["id"],
-                device_type=device["type"],
-            ).inc(duration)
+        last_on_interval = device_on_intervals[device["id"]][-1]
+        last_on_time = last_on_interval[0]
+        last_on_interval[1] = datetime.now()
+        duration = (datetime.now() - last_on_time).total_seconds()
+        device_usage_seconds.labels(
+            device_id=device["id"],
+            device_type=device["type"],
+        ).inc(duration)
 
     device_status.labels(
         device_id=device["id"],
         device_type=device["type"],
     ).set(1 if new_status in {"on", "locked", "closed"} else 0)
+
+
+def get_device_on_interval_at_time(device_id: str, check_time: datetime) -> tuple[datetime, datetime | None] | None:
+    if device_id in device_on_intervals:
+        for on_time, off_time in device_on_intervals[device_id]:
+            if off_time is None:
+                return on_time, None
+            else:
+                if on_time <= check_time <= off_time:
+                    return on_time, off_time
+    return None
 
 
 def flip_device_boolean_flag(metric: Gauge, device_id: str, flag: str, new_value: bool) -> bool:
@@ -698,7 +710,7 @@ def ready_check():
         return jsonify({"Status": "Not ready"}), 500
 
 
-def query_prometheus(query) -> Union[List[Dict[str, Any]], Dict[str, str]]:
+def query_prometheus(query) -> Union[list[dict[str, Any]], dict[str, str]]:
     try:
         app.logger.debug(f"Querying Prometheus: {query}")
         resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=5)
@@ -711,27 +723,42 @@ def query_prometheus(query) -> Union[List[Dict[str, Any]], Dict[str, str]]:
         return {"error": str(e)}
 
 
+def query_prometheus_range(metric: str, start: datetime, end: datetime, step: str = "60s") -> (
+        Union)[list[dict[str, Any]], dict[str, str]]:
+    query = f"increase({metric}[{step}])"
+    try:
+        params = {
+            "query": query,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "step": step
+        }
+        app.logger.debug(f"Querying Prometheus range: {params}")
+        resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query_range", params=params, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("data", {}).get("result", [])
+    except requests.RequestException as e:
+        app.logger.exception(f"Error querying Prometheus for metric '{metric}' in range")
+        return {"error": str(e)}
+
+
 @app.get("/api/devices/analytics")
 def device_analytics():
-    on_devices = devices_collection.find({"status": "on"}, {'_id': 0})
-    for device in on_devices:
-        last_on_time = device_on_timestamps.get(device["id"], None)
-        if last_on_time:
-            duration = (datetime.now() - last_on_time).total_seconds()
-            device_usage_seconds.labels(
-                device_id=device["id"],
-                device_type=device["type"],
-            ).inc(duration)
-            device_on_timestamps[device["id"]] = datetime.now()
     try:
         body = request.get_json(silent=True) or {}
         app.logger.debug(f"Received analytics request body: {body}")
 
         now = datetime.now(UTC)
-        week_ago = now - timedelta(days=7)
+        to_ts = datetime.fromisoformat(body.get("to")) if "to" in body else now
+        from_ts = datetime.fromisoformat(body.get("from")) if "from" in body else to_ts - timedelta(days=7)
 
-        usage_results = query_prometheus("device_usage_seconds_total")
-        event_results = query_prometheus("device_on_events_total")
+        # Safety check
+        if from_ts >= to_ts:
+            return jsonify({"error": "'from' must be before 'to'"}), 400
+
+        usage_results = query_prometheus_range("device_usage_seconds", from_ts, to_ts)
+        event_results = query_prometheus_range("device_on_events_total", from_ts, to_ts)
 
         if isinstance(usage_results, dict) and "error" in usage_results:
             app.logger.error(f"Prometheus usage query failed: {usage_results['error']}")
@@ -739,11 +766,24 @@ def device_analytics():
 
         device_analytics_json = {}
 
+        def sum_series_values(series):
+            return sum(float(point[1]) for point in series.get("values", []))
+
         for item in usage_results:
             device_id = item["metric"].get("device_id", "unknown")
             usage_seconds = float(item["value"][1])
             device_analytics_json.setdefault(device_id, {})["total_usage_minutes"] = usage_seconds / 60
-
+            # Include currently on devices that haven't been added to the metric yet
+            interval = get_device_on_interval_at_time(device_id, to_ts)
+            if interval:
+                on_time, off_time = interval
+                effective_start = max(on_time, from_ts)
+                effective_end = min(off_time or to_ts, to_ts)
+                extra_seconds = (effective_end - effective_start).total_seconds()
+                if device_id in device_analytics_json:
+                    device_analytics_json[device_id]["total_usage_minutes"] += extra_seconds / 60
+                else:
+                    device_analytics_json[device_id] = {"total_usage_minutes": extra_seconds / 60}
         for item in event_results:
             device_id = item["metric"].get("device_id", "unknown")
             on_count = int(float(item["value"][1]))
@@ -754,15 +794,16 @@ def device_analytics():
 
         response = {
             "analytics_window": {
-                "from": week_ago.isoformat(),
-                "to": now.isoformat()
+                "from": from_ts.isoformat(),
+                "to": to_ts.isoformat()
             },
             "aggregate": {
-                "total_devices": len(device_analytics_json),
+                "total_devices": len(seen_devices),
                 "total_on_events": total_on_events,
                 "total_usage_minutes": total_usage
             },
-            "devices": device_analytics_json
+            "on_devices": device_analytics_json,
+            "message": "For full analytics, charts, and trends, visit the Grafana dashboard."
         }
 
         app.logger.debug(f"Returning analytics response: {response}")
