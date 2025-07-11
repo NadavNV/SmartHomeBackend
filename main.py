@@ -102,15 +102,12 @@ seen_devices: set[dict] = set()
 def mark_device_read(device: Mapping[str, Any]):
     device_id = device.get("id")
     if device_id and device_id not in seen_devices:
-        seen_devices.add(device_id)
         app.logger.info(f"Device {device_id} read from DB for the first time")
         app.logger.info(f"Adding metrics for device {device_id}")
-        for key, value in device.items():
-            if key != "parameters" and key != "id":
-                app.logger.info(f"Device {device_id} key {key} value {value}")
-                update_device_metrics(device, device)
+        update_device_metrics(device, device)
         for key, value in device["parameters"].items():
             device_metrics_action(device, key, value)
+        seen_devices.add(device_id)
 
 
 def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
