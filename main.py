@@ -309,12 +309,12 @@ def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tu
                     water_heater_schedule_info.labels(
                         device_id=device["id"],
                         scheduled_on=value,
-                        scheduled_off=device["scheduled_off"],
+                        scheduled_off=device["parameters"]["scheduled_off"],
                     ).set(1)
                 case "scheduled_off":
                     water_heater_schedule_info.labels(
                         device_id=device["id"],
-                        scheduled_on=device["scheduled_on"],
+                        scheduled_on=device["parameters"]["scheduled_on"],
                         scheduled_off=value,
                     )
                 case _:
@@ -325,14 +325,12 @@ def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tu
                 case "brightness":
                     light_brightness.labels(
                         device_id=device["id"],
-                        device_type=device["type"],
                         is_dimmable=str(device["parameters"]["is_dimmable"]),
                     ).set(value)
                 case "color":
                     try:
                         light_color.labels(
                             device_id=device["id"],
-                            device_type=device["type"],
                             dynamic_color=str(device["parameters"]["dynamic_color"]),
                         ).set(int("0x" + value[1:]))
                     except (KeyError, ValueError):
