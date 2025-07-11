@@ -129,7 +129,7 @@ def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
         app.logger.warning(f"Unknown binary state: {new_status}")
         return
 
-    if new_status == "on" and device["status"] == "off":
+    if new_status == "on" and (device not in seen_devices or device["status"] == "off"):
         device_on_intervals.setdefault(device["id"], []).append([datetime.now(), None])
         device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
 
@@ -344,7 +344,7 @@ def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tu
                         light_color.labels(
                             device_id=device["id"],
                             dynamic_color=str(device["parameters"]["dynamic_color"]),
-                        ).set(int("0x" + value[1:]))
+                        ).set(int("0x" + value[1:], 16))
                     except (KeyError, ValueError):
                         app.logger.exception(f"Incorrect color string '{value}'")
                 case "is_dimmable" | "dynamic_color":
