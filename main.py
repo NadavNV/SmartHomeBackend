@@ -56,9 +56,9 @@ request_latency = Histogram('request_latency_seconds', 'Request latency', ['endp
 # Device metrics
 device_metadata = Gauge("device_metadata", "Key/Value device Metadata", ["device_id", "key", "value"])
 device_status = Gauge("device_status", "Device on/off state", ["device_id", "device_type"])
-device_on_events = Counter("device_on_events", "Number of times device turned on",
+device_on_events = Counter("device_on_events_total", "Number of times device turned on",
                            ["device_id", "device_type", ])
-device_usage_seconds = Counter("device_usage_seconds", "Total on-time in seconds",
+device_usage_seconds = Counter("device_usage_seconds_total", "Total on-time in seconds",
                                ["device_id", "device_type"])
 # Air conditioner
 ac_temperature = Gauge("ac_temperature", "Current temperature (AC)", ["device_id"])
@@ -724,8 +724,8 @@ def query_prometheus(query) -> Union[list[dict[str, Any]], dict[str, str]]:
         return {"error": str(e)}
 
 
-def query_prometheus_range(metric: str, start: datetime, end: datetime, step: str = "60s") -> Union[
-    list[dict[str, Any]], dict[str, str]]:
+def query_prometheus_range(metric: str, start: datetime, end: datetime, step: str = "60s") -> (
+        Union)[list[dict[str, Any]], dict[str, str]]:
     query = metric
     try:
         params = {
@@ -778,7 +778,7 @@ def device_analytics():
         if from_ts >= to_ts:
             return jsonify({"error": "'from' must be before 'to'"}), 400
 
-        usage_results = query_prometheus_point_increase("device_usage_seconds", from_ts, to_ts)
+        usage_results = query_prometheus_point_increase("device_usage_seconds_total", from_ts, to_ts)
         event_results = query_prometheus_point_increase("device_on_events_total", from_ts, to_ts)
 
         if isinstance(usage_results, dict) and "error" in usage_results:
@@ -796,6 +796,7 @@ def device_analytics():
                 continue
             device_id = item["metric"].get("device_id", "unknown")
             usage_seconds = float(item["value"][1])
+            app.logger.info(f"Device {device_id} usage seconds: {usage_seconds}")
             device_analytics_json.setdefault(device_id, {})["total_usage_minutes"] = usage_seconds / 60
             # Include currently on devices that haven't been added to the metric yet
             interval = get_device_on_interval_at_time(device_id, to_ts)
@@ -814,8 +815,10 @@ def device_analytics():
                 continue
             device_id = item["metric"].get("device_id", "unknown")
             on_count = int(float(item["value"][1]))
+            app.logger.info(f"Device {device_id} on count: {on_count}")
             device_analytics_json.setdefault(device_id, {})["on_events"] = on_count
 
+        app.logger.info(json.dumps(device_analytics_json, indent=4, sort_keys=True))
         total_usage = sum(d.get("total_usage_minutes", 0) for d in device_analytics_json.values())
         total_on_events = sum(d.get("on_events", 0) for d in device_analytics_json.values())
 
