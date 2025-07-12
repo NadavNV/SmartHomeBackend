@@ -764,6 +764,9 @@ def device_analytics():
         if isinstance(usage_results, dict) and "error" in usage_results:
             app.logger.error(f"Prometheus usage query failed: {usage_results['error']}")
             return jsonify({"error": "Failed to query Prometheus", "details": usage_results["error"]}), 500
+        if isinstance(event_results, dict) and "error" in usage_results:
+            app.logger.error(f"Prometheus usage query failed: {event_results['error']}")
+            return jsonify({"error": "Failed to query Prometheus", "details": event_results["error"]}), 500
 
         device_analytics_json = {}
 
