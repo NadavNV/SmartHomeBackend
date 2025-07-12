@@ -50,7 +50,7 @@ RETRIES = 5
 RETRY_TIMEOUT = 10
 
 # Setting up the MQTT client
-BROKER_URL = os.getenv("BROKER_URL", "test.mosquitto.org")
+BROKER_HOST = os.getenv("BROKER_HOST", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 
 MONGO_DB_CONNECTION_STRING = os.getenv("MONGO_DB_CONNECTION_STRING")
@@ -922,9 +922,9 @@ mqtt.on_connect = on_connect
 mqtt.on_disconnect = on_disconnect
 mqtt.on_message = on_message
 
-app.logger.info(f"Connecting to MQTT broker {BROKER_URL}:{BROKER_PORT}...")
+app.logger.info(f"Connecting to MQTT broker {BROKER_HOST}:{BROKER_PORT}...")
 
-mqtt.connect_async(BROKER_URL, BROKER_PORT)
+mqtt.connect_async(BROKER_HOST, BROKER_PORT)
 mqtt.loop_start()
 
 
