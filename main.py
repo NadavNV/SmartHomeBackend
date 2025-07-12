@@ -176,12 +176,12 @@ def flip_device_boolean_flag(metric: Gauge, device_id: str, flag: str, new_value
 
 
 # Validates that the request data contains all the required fields
-def validate_device_data(new_device):
+def validate_device_data(new_device) -> tuple[bool, str | None]:
     required_fields = ['id', 'type', 'room', 'name', 'status', 'parameters']
     for field in required_fields:
         if field not in new_device:
-            return False
-    return True
+            return False, field
+    return True, None
 
 
 # Checks the validity of the device id
@@ -473,7 +473,8 @@ def on_message(mqtt_client, userdata, msg):
                     if "id" in payload and payload["id"] != device_id:
                         app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
                         return
-                    if validate_device_data(payload):
+                    success, reason = validate_device_data(payload)
+                    if success:
                         if id_exists(payload["id"]):
                             app.logger.error("ID already exists")
                             return
@@ -481,7 +482,7 @@ def on_message(mqtt_client, userdata, msg):
                         devices_collection.insert_one(payload)
                         app.logger.info("Device added successfully")
                         return
-                    app.logger.error("Missing required field")
+                    app.logger.error(f"Missing required field {reason}")
                     return
                 case "delete":
                     # Remove a device from the database
@@ -568,7 +569,8 @@ def get_device(device_id):
 @app.post("/api/devices")
 def add_device():
     new_device = request.json
-    if validate_device_data(new_device):
+    success, reason = validate_device_data(new_device)
+    if success:
         if id_exists(new_device["id"]):
             return jsonify({'error': "ID already exists"}), 400
         devices_collection.insert_one(new_device)
@@ -581,7 +583,7 @@ def add_device():
             method="post",
         )
         return jsonify({'output': "Device added successfully"}), 200
-    return jsonify({'error': 'Missing required field'}), 400
+    return jsonify({'error': f'Missing required field {reason}'}), 400
 
 
 # Deletes a device from the device list
