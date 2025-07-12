@@ -774,6 +774,9 @@ def device_analytics():
             return sum(float(point[1]) for point in series.get("values", []))
 
         for item in usage_results:
+            if "value" not in item:
+                app.logger.warning(f"Missing 'value' in usage result: {item}")
+                continue
             device_id = item["metric"].get("device_id", "unknown")
             usage_seconds = float(item["value"][1])
             device_analytics_json.setdefault(device_id, {})["total_usage_minutes"] = usage_seconds / 60
@@ -789,6 +792,9 @@ def device_analytics():
                 else:
                     device_analytics_json[device_id] = {"total_usage_minutes": extra_seconds / 60}
         for item in event_results:
+            if "value" not in item:
+                app.logger.warning(f"Missing 'value' in event result: {item}")
+                continue
             device_id = item["metric"].get("device_id", "unknown")
             on_count = int(float(item["value"][1]))
             device_analytics_json.setdefault(device_id, {})["on_events"] = on_count
