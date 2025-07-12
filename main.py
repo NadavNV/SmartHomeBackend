@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
-from typing import Any, Mapping, Union
+from typing import Any, cast, Mapping, Union
 import paho.mqtt.client as paho
 from paho.mqtt.properties import Properties
 from paho.mqtt.packettypes import PacketTypes
@@ -784,20 +784,23 @@ def on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _propertie
 
 
 # Receives the published mqtt payloads and updates the database accordingly
-def on_message(_mqtt_client, _userdata, msg):
+def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage):
     sender_id = None
-    if msg.properties and msg.properties.UserProperty:
-        props = dict(msg.properties.UserProperty)
-        sender_id = props.get("sender_id")
+    props = msg.properties
+    user_props = getattr(props, "UserProperty", None)
+    if user_props is not None:
+        sender_id = dict(user_props).get("sender_id")
 
     if sender_id is None:
         app.logger.error("Message missing sender")
 
     if sender_id == client_id:
         return
+
     app.logger.info(f"MQTT Message Received on {msg.topic}")
+    payload = cast(bytes, msg.payload)
     try:
-        payload = json.loads(msg.payload.decode())
+        payload = json.loads(payload.decode("utf-8"))
     except UnicodeDecodeError as e:
         app.logger.exception(f"Error decoding payload: {e.reason}")
         return
