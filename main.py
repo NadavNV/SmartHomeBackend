@@ -724,9 +724,9 @@ def query_prometheus(query) -> Union[list[dict[str, Any]], dict[str, str]]:
         return {"error": str(e)}
 
 
-def query_prometheus_range(metric: str, start: datetime, end: datetime, step: str = "60s") -> (
-        Union)[list[dict[str, Any]], dict[str, str]]:
-    query = f"increase({metric}[{step}])"
+def query_prometheus_range(metric: str, start: datetime, end: datetime, step: str = "60s") -> Union[
+    list[dict[str, Any]], dict[str, str]]:
+    query = metric
     try:
         params = {
             "query": query,
@@ -744,6 +744,26 @@ def query_prometheus_range(metric: str, start: datetime, end: datetime, step: st
         return {"error": str(e)}
 
 
+def query_prometheus_point_increase(metric: str, start: datetime, end: datetime) -> (
+        Union)[list[dict[str, Any]], dict[str, str]]:
+    window_seconds = int((end - start).total_seconds())
+    range_expr = f"{window_seconds}s"
+    query = f"increase({metric}[{range_expr}])"
+    try:
+        params = {
+            "query": query,
+            "time": end.isoformat()  # run instant query at the end of window
+        }
+        app.logger.debug(f"Querying Prometheus point increase: {params}")
+        resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params=params, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("data", {}).get("result", [])
+    except requests.RequestException as e:
+        app.logger.exception(f"Error querying Prometheus point increase for metric '{metric}'")
+        return {"error": str(e)}
+
+
 @app.get("/api/devices/analytics")
 def device_analytics():
     try:
@@ -758,8 +778,8 @@ def device_analytics():
         if from_ts >= to_ts:
             return jsonify({"error": "'from' must be before 'to'"}), 400
 
-        usage_results = query_prometheus_range("device_usage_seconds", from_ts, to_ts)
-        event_results = query_prometheus_range("device_on_events_total", from_ts, to_ts)
+        usage_results = query_prometheus_point_increase("device_usage_seconds", from_ts, to_ts)
+        event_results = query_prometheus_point_increase("device_on_events_total", from_ts, to_ts)
 
         if isinstance(usage_results, dict) and "error" in usage_results:
             app.logger.error(f"Prometheus usage query failed: {usage_results['error']}")
@@ -769,9 +789,6 @@ def device_analytics():
             return jsonify({"error": "Failed to query Prometheus", "details": event_results["error"]}), 500
 
         device_analytics_json = {}
-
-        def sum_series_values(series):
-            return sum(float(point[1]) for point in series.get("values", []))
 
         for item in usage_results:
             if "value" not in item:
