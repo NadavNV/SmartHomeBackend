@@ -104,6 +104,8 @@ def mark_device_read(device: Mapping[str, Any]):
     if device_id and device_id not in seen_devices:
         app.logger.info(f"Device {device_id} read from DB for the first time")
         app.logger.info(f"Adding metrics for device {device_id}")
+        device_on_events.labels(device_id=device_id, device_type=device["type"]).inc(0)
+        device_usage_seconds.labels(device_id=device_id, device_type=device["type"]).inc(0)
         update_device_metrics(device, device)
         for key, value in device["parameters"].items():
             device_metrics_action(device, key, value)
