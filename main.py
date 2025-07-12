@@ -131,7 +131,8 @@ def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
     if new_status == "on" and (device["id"] not in seen_devices or device["status"] == "off"):
         device_on_intervals.setdefault(device["id"], []).append([datetime.now(UTC), None])
         app.logger.info(f"Created new device interval: {device_on_intervals[device["id"]]}")
-        device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
+        if device["id"] in seen_devices:
+            device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
 
     if new_status == "off" and device["status"] == "on":
         app.logger.info(f"Closing device interval: {device_on_intervals[device["id"]]}")
