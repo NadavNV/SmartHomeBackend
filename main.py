@@ -2,6 +2,8 @@ from flask import Flask, jsonify, request, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
 from typing import Any, Mapping, Union
 import paho.mqtt.client as paho
+from paho.mqtt.properties import Properties
+from paho.mqtt.packettypes import PacketTypes
 import json
 import atexit
 from pymongo.mongo_client import MongoClient
@@ -763,11 +765,12 @@ def validate_action_parameters(device_type: str, updated_parameters: dict) -> bo
     return True
 
 
-mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2, protocol=paho.MQTTv5)
+client_id = f"flask-backend-{os.getenv('HOSTNAME')}"
+mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2, protocol=paho.MQTTv5, client_id=client_id)
 
 
 # Function to run after the MQTT client finishes connecting to the broker
-def on_connect(client, userdata, connect_flags, reason_code, properties) -> None:
+def on_connect(client, _userdata, _connect_flags, reason_code, _properties) -> None:
     app.logger.info(f'CONNACK received with code {reason_code}.')
     if reason_code == 0:
         app.logger.info("Connected successfully")
@@ -776,103 +779,103 @@ def on_connect(client, userdata, connect_flags, reason_code, properties) -> None
         app.logger.error(f"Connection failed with code {reason_code}")
 
 
-def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None) -> None:
+def on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
     app.logger.warning(f"Disconnected from broker with reason: {reason_code}")
 
 
 # Receives the published mqtt payloads and updates the database accordingly
-def on_message(mqtt_client, userdata, msg):
+def on_message(_mqtt_client, _userdata, msg):
+    sender_id = None
+    if msg.properties and msg.properties.UserProperty:
+        props = dict(msg.properties.UserProperty)
+        sender_id = props.get("sender_id")
+
+    if sender_id is None:
+        app.logger.error("Message missing sender")
+
+    if sender_id == client_id:
+        return
     app.logger.info(f"MQTT Message Received on {msg.topic}")
     try:
         payload = json.loads(msg.payload.decode())
-        # Ignore self messages
-        if "sender" in payload:
-            if payload["sender"] == "backend":
-                app.logger.info("Ignoring self message")
-                return
-            else:
-                payload = payload["contents"]
-        else:
-            app.logger.error("Payload missing sender")
-            return
-
-        # Extract device_id from topic: expected format project/home/<device_id>/<method>
-        topic_parts = msg.topic.split('/')
-        if len(topic_parts) == 4:
-            device_id = topic_parts[2]
-            method = topic_parts[-1]
-            device = devices_collection.find_one({"id": device_id}, {"_id": 0})
-            if device is None:
-                app.logger.error(f"Device ID {device_id} not found")
-                return
-            match method:
-                case "action":
-                    # Only update device parameters
-                    if not validate_action_parameters(device['type'], payload):
-                        return
-                    update_fields = {}
-                    for key, value in payload.items():
-                        app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-                        success, reason = device_metrics_action(device, key, value)
-                        if not success:
-                            return
-                        update_fields[f"parameters.{key}"] = value
-                    devices_collection.update_one(
-                        {"id": device_id},
-                        {"$set": update_fields}
-                    )
-                    return
-                case "update":
-                    # Only update device configuration (i.e. name, status, and room)
-                    if "id" in payload and payload["id"] != device_id:
-                        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
-                        return
-                    # Make sure that this endpoint is only used to update specific fields
-                    allowed_fields = ['room', 'name', 'status']
-                    for field in payload:
-                        if field not in allowed_fields:
-                            app.logger.error(f"Incorrect field in update method: {field}")
-                            return
-                    update_device_metrics(device, payload)
-                    # Find device by id and update the fields with 'set'
-                    devices_collection.update_one(
-                        {"id": device_id},
-                        {"$set": payload}
-                    )
-                    return
-                case "post":
-                    # Add a new device to the database
-                    if "id" in payload and payload["id"] != device_id:
-                        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
-                        return
-                    success, reason = validate_device_data(payload)
-                    if success:
-                        if id_exists(payload["id"]):
-                            app.logger.error("ID already exists")
-                            return
-                        devices_collection.insert_one(payload)
-                        app.logger.info("Device added successfully")
-                        return
-                    app.logger.error(f"Missing required field {reason}")
-                    return
-                case "delete":
-                    # Remove a device from the database
-                    if id_exists(device_id):
-                        if device["status"] == "on":
-                            # Calculate device usage, etc.
-                            update_binary_device_status(device, "off")
-                        devices_collection.delete_one({"id": device_id})
-                        app.logger.info("Device deleted successfully")
-                        return
-                    app.logger.error("ID not found")
-                    return
-                case _:
-                    app.logger.error(f"Unknown method: {method}")
-        else:
-            app.logger.error(f"Incorrect topic {msg.topic}")
-
     except UnicodeDecodeError as e:
         app.logger.exception(f"Error decoding payload: {e.reason}")
+        return
+    payload = payload["contents"]
+    # Extract device_id from topic: expected format project/home/<device_id>/<method>
+    topic_parts = msg.topic.split('/')
+    if len(topic_parts) == 4:
+        device_id = topic_parts[2]
+        method = topic_parts[-1]
+        device = devices_collection.find_one({"id": device_id}, {"_id": 0})
+        if device is None:
+            app.logger.error(f"Device ID {device_id} not found")
+            return
+        match method:
+            case "action":
+                # Only update device parameters
+                if not validate_action_parameters(device['type'], payload):
+                    return
+                update_fields = {}
+                for key, value in payload.items():
+                    app.logger.info(f"Setting parameter '{key}' to value '{value}'")
+                    success, reason = device_metrics_action(device, key, value)
+                    if not success:
+                        return
+                    update_fields[f"parameters.{key}"] = value
+                devices_collection.update_one(
+                    {"id": device_id},
+                    {"$set": update_fields}
+                )
+                return
+            case "update":
+                # Only update device configuration (i.e. name, status, and room)
+                if "id" in payload and payload["id"] != device_id:
+                    app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
+                    return
+                # Make sure that this endpoint is only used to update specific fields
+                allowed_fields = ['room', 'name', 'status']
+                for field in payload:
+                    if field not in allowed_fields:
+                        app.logger.error(f"Incorrect field in update method: {field}")
+                        return
+                update_device_metrics(device, payload)
+                # Find device by id and update the fields with 'set'
+                devices_collection.update_one(
+                    {"id": device_id},
+                    {"$set": payload}
+                )
+                return
+            case "post":
+                # Add a new device to the database
+                if "id" in payload and payload["id"] != device_id:
+                    app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
+                    return
+                success, reason = validate_device_data(payload)
+                if success:
+                    if id_exists(payload["id"]):
+                        app.logger.error("ID already exists")
+                        return
+                    devices_collection.insert_one(payload)
+                    app.logger.info("Device added successfully")
+                    return
+                app.logger.error(f"Missing required field {reason}")
+                return
+            case "delete":
+                # Remove a device from the database
+                if id_exists(device_id):
+                    if device["status"] == "on":
+                        # Calculate device usage, etc.
+                        update_binary_device_status(device, "off")
+                    devices_collection.delete_one({"id": device_id})
+                    app.logger.info("Device deleted successfully")
+                    return
+                app.logger.error("ID not found")
+                return
+            case _:
+                app.logger.error(f"Unknown method: {method}")
+    else:
+        app.logger.error(f"Incorrect topic {msg.topic}")
 
 
 mqtt.on_connect = on_connect
@@ -892,7 +895,9 @@ def publish_mqtt(contents: dict, device_id: str, method: str):
         "sender": "backend",
         "contents": contents,
     })
-    mqtt.publish(topic, payload.encode(), qos=2)
+    properties = Properties(PacketTypes.PUBLISH)
+    properties.UserProperty = [("sender_id", client_id)]
+    mqtt.publish(topic, payload.encode(), qos=2, properties=properties)
 
 
 @app.before_request
@@ -1051,7 +1056,7 @@ def query_prometheus(query) -> Union[list[dict[str, Any]], dict[str, str]]:
 
 
 def query_prometheus_range(metric: str, start: datetime, end: datetime, step: str = "60s") -> (
-        Union)[list[dict[str, Any]], dict[str, str]]:
+        Union[list[dict[str, Any]], dict[str, str]]):
     query = metric
     try:
         params = {
@@ -1071,7 +1076,7 @@ def query_prometheus_range(metric: str, start: datetime, end: datetime, step: st
 
 
 def query_prometheus_point_increase(metric: str, start: datetime, end: datetime) -> (
-        Union)[list[dict[str, Any]], dict[str, str]]:
+        Union[list[dict[str, Any]], dict[str, str]]):
     window_seconds = int((end - start).total_seconds())
     range_expr = f"{window_seconds}s"
     query = f"increase({metric}[{range_expr}])"
