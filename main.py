@@ -4,6 +4,7 @@ from typing import Any, cast, Mapping, Union
 import paho.mqtt.client as paho
 from paho.mqtt.properties import Properties
 from paho.mqtt.packettypes import PacketTypes
+import redis
 import json
 import atexit
 from pymongo.mongo_client import MongoClient
@@ -42,6 +43,8 @@ load_dotenv()
 username = os.getenv("MONGO_USER")
 password = os.getenv("MONGO_PASS")
 
+REDIS_PASS = os.getenv("REDIS_PASS")
+
 # How many times to attempt a connection request
 RETRIES = 5
 RETRY_TIMEOUT = 10
@@ -50,7 +53,7 @@ RETRY_TIMEOUT = 10
 BROKER_URL = os.getenv("BROKER_URL", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 
-DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING")
+MONGO_DB_CONNECTION_STRING = os.getenv("MONGO_DB_CONNECTION_STRING")
 
 REQUEST_COUNT = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
 REQUEST_LATENCY = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
@@ -164,9 +167,28 @@ auto_lock_enabled = Gauge("auto_lock_enabled", "Auto-lock enabled",
 lock_battery_level = Gauge("lock_battery_level", "Battery level", ["device_id"])
 # Curtain
 curtain_status = Gauge("curtain_status", "Open/closed status", ["device_id", "state"])
+
+
 # For tracking usage
-device_on_intervals: dict[str, list[list[datetime | None]]] = {}
-seen_devices: set[dict] = set()
+
+
+def record_on_interval_start(device_id: str) -> None:
+    r.rpush(f"device_on_intervals:{device_id}", json.dumps([datetime.now(UTC).isoformat(), None]))
+
+
+def record_on_interval_end(device_id: str) -> float | None:
+    key = f"device_on_intervals:{device_id}"
+    intervals = r.lrange(key, 0, -1)
+    if not intervals:
+        return None
+    # Update the last interval
+    last_interval = json.loads(intervals[-1])
+    last_interval[1] = datetime.now(UTC).isoformat()
+    # Replace last item
+    r.lset(key, len(intervals) - 1, json.dumps(last_interval))
+    start_time = datetime.fromisoformat(last_interval[0])
+    end_time = datetime.fromisoformat(last_interval[1])
+    return (end_time - start_time).total_seconds()
 
 
 def verify_type_and_range(value: Any, name: str, cls: type,
@@ -216,7 +238,7 @@ def verify_type_and_range(value: Any, name: str, cls: type,
 
 def mark_device_read(device: Mapping[str, Any]):
     device_id = device.get("id")
-    if device_id and device_id not in seen_devices:
+    if device_id and not r.sismember("seen_devices", device["id"]):
         app.logger.info(f"Device {device_id} read from DB for the first time")
         app.logger.info(f"Adding metrics for device {device_id}")
         device_on_events.labels(device_id=device_id, device_type=device["type"]).inc(0)
@@ -224,7 +246,7 @@ def mark_device_read(device: Mapping[str, Any]):
         update_device_metrics(device, device)
         for key, value in device["parameters"].items():
             device_metrics_action(device, key, value)
-        seen_devices.add(device_id)
+        r.sadd("seen_devices", device_id)
 
 
 def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
@@ -243,22 +265,22 @@ def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
         app.logger.warning(f"Unknown binary state: {new_status}")
         return
 
-    if new_status == "on" and (device["id"] not in seen_devices or device["status"] == "off"):
-        device_on_intervals.setdefault(device["id"], []).append([datetime.now(UTC), None])
-        app.logger.info(f"Created new device interval: {device_on_intervals[device["id"]]}")
-        if device["id"] in seen_devices:
+    device_key = f"device_on_intervals:{device["id"]}"
+    seen = r.sismember("seen_devices", device["id"])
+
+    if new_status == "on" and (not seen or device["status"] == "off"):
+        # Starting interval
+        record_on_interval_start(device["id"])
+        app.logger.info(f"Created new device interval: {r.lrange(device_key, 0, -1)}")
+        if r.sismember("seen_devices", device["id"]):
             device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
 
-    if new_status == "off" and device["status"] == "on":
-        app.logger.info(f"Closing device interval: {device_on_intervals[device["id"]]}")
-        last_on_interval = device_on_intervals[device["id"]][-1]
-        last_on_time = last_on_interval[0]
-        last_on_interval[1] = datetime.now(UTC)
-        duration = (datetime.now(UTC) - last_on_time).total_seconds()
-        device_usage_seconds.labels(
-            device_id=device["id"],
-            device_type=device["type"],
-        ).inc(duration)
+        # Ending interval
+        if new_status == "off" and device["status"] == "on":
+            app.logger.info(f"Closing device interval: {r.lrange(device_key, 0, -1)}")
+            duration = record_on_interval_end(device["id"])
+            if duration:
+                device_usage_seconds.labels(device_id=device["id"], device_type=device["type"]).inc(duration)
 
     device_status.labels(
         device_id=device["id"],
@@ -267,13 +289,20 @@ def update_binary_device_status(device: Mapping[str, Any], new_status) -> None:
 
 
 def get_device_on_interval_at_time(device_id: str, check_time: datetime) -> tuple[datetime, datetime | None] | None:
-    if device_id in device_on_intervals:
-        for on_time, off_time in device_on_intervals[device_id]:
+    key = f"device_on_intervals:{device_id}"
+    intervals = r.lrange(key, 0, -1)  # Get all intervals for the device
+    for interval_json in intervals:
+        try:
+            on_str, off_str = json.loads(interval_json)
+            on_time = datetime.fromisoformat(on_str)
+            off_time = datetime.fromisoformat(off_str) if off_str is not None else None
+
             if off_time is None:
                 return on_time, None
-            else:
-                if on_time <= check_time <= off_time:
-                    return on_time, off_time
+            elif on_time <= check_time <= off_time:
+                return on_time, off_time
+        except (ValueError, TypeError):
+            continue  # skip malformed intervals
     return None
 
 
@@ -552,7 +581,7 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 # Database parameters
-uri = DB_CONNECTION_STRING if DB_CONNECTION_STRING is not None else (
+uri = MONGO_DB_CONNECTION_STRING if MONGO_DB_CONNECTION_STRING is not None else (
         f"mongodb+srv://{username}:{password}" +
         "@smart-home-db.w9dsqtr.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-db"
 )
@@ -575,6 +604,14 @@ for attempt in range(RETRIES):
 
 db = mongo_client["smart_home"]
 devices_collection = db["devices"]
+
+r = redis.Redis(
+    host="redis-13476.c276.us-east-1-2.ec2.redns.redis-cloud.com",
+    port=13476,
+    decode_responses=True,
+    username="default",
+    password=REDIS_PASS,
+)
 
 
 def update_device_metrics(old_device: Mapping[str, Any], updated_device: Mapping[str, Any]) -> None:
@@ -926,7 +963,7 @@ def get_all_devices():
     devices = list(devices_collection.find({}, {'_id': 0}))
     for device in devices:
         if "id" in device:
-            if device["id"] not in seen_devices:
+            if not r.sismember("seen_devices", device["id"]):
                 mark_device_read(device)
     return jsonify(devices)
 
@@ -936,7 +973,7 @@ def get_all_devices():
 def get_device(device_id):
     device = devices_collection.find_one({'id': device_id}, {'_id': 0})
     if "id" in device:
-        if device["id"] not in seen_devices:
+        if not r.sismember("seen_devices", device["id"]):
             mark_device_read(device)
     if device is not None:
         return jsonify(device)
@@ -969,7 +1006,7 @@ def add_device():
 @app.delete("/api/devices/<device_id>")
 def delete_device(device_id):
     if id_exists(device_id):
-        seen_devices.remove(device_id)  # Allows adding a new device with old id
+        r.srem("seen_devices", device_id)  # Allows adding a new device with old id
         devices_collection.delete_one({"id": device_id})
         publish_mqtt(
             contents={},
@@ -1162,7 +1199,7 @@ def device_analytics():
                 "to": to_ts.isoformat()
             },
             "aggregate": {
-                "total_devices": len(seen_devices),
+                "total_devices": r.scard("seen_devices"),
                 "total_on_events": total_on_events,
                 "total_usage_minutes": total_usage
             },
