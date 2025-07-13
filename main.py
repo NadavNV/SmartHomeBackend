@@ -37,14 +37,16 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
+app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+
 # Env variables
-load_dotenv()
+load_dotenv("/config/constants.env")
 
 REDIS_PASS = os.getenv("REDIS_PASS")
 
 # How many times to attempt a connection request
 RETRIES = 5
-RETRY_TIMEOUT = 10
 
 # Setting up the MQTT client
 BROKER_HOST = os.getenv("BROKER_HOST", "test.mosquitto.org")
@@ -58,28 +60,29 @@ REQUEST_COUNT = Counter('request_count', 'Total Request Count', ['method', 'endp
 REQUEST_LATENCY = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
 
 # Minimum temperature (Celsius) for water heater
-MIN_WATER_TEMP = 49
+MIN_WATER_TEMP = int(os.getenv('VITE_MIN_WATER_TEMP', 49))
 # Maximum temperature (Celsius) for water heater
-MAX_WATER_TEMP = 60
+MAX_WATER_TEMP = int(os.getenv('VITE_MAX_WATER_TEMP', 60))
 # Minimum temperature (Celsius) for air conditioner
-MIN_AC_TEMP = 16
+MIN_AC_TEMP = int(os.getenv('VITE_MIN_AC_TEMP', 16))
 # Maximum temperature (Celsius) for air conditioner
-MAX_AC_TEMP = 30
+MAX_AC_TEMP = int(os.getenv('VITE_MAX_AC_TEMP', 30))
 # Minimum brightness for dimmable light
-MIN_BRIGHTNESS = 0
+MIN_BRIGHTNESS = int(os.getenv('VITE_MIN_BRIGHTNESS', 0))
 # Maximum brightness for dimmable light
-MAX_BRIGHTNESS = 100
+MAX_BRIGHTNESS = int(os.getenv("VITE_MAX_BRIGHTNESS", 100))
 # Minimum position for curtain
-MIN_POSITION = 0
+MIN_POSITION = int(os.getenv("VITE_MIN_POSITION", 0))
 # Maximum position for curtain
-MAX_POSITION = 100
+MAX_POSITION = int(os.getenv("VITE_MAX_POSITION", 100))
 # Minimum value for battery level
-MIN_BATTERY = 0
+MIN_BATTERY = int(os.getenv("VITE_MIN_BATTERY", 0))
 # Maximum value for battery level
-MAX_BATTERY = 100
+MAX_BATTERY = int(os.getenv("VITE_MAX_BATTERY", 100))
 
-DEVICE_TYPES = {"light", "water_heater", "air_conditioner", "door_lock", "curtain"}
-WATER_HEATER_PARAMETERS = {
+DEVICE_TYPES = set(json.loads(os.getenv("VITE_DEVICE_TYPES"))) or {"light", "water_heater", "air_conditioner",
+                                                                   "door_lock", "curtain"}
+WATER_HEATER_PARAMETERS = set(json.loads(os.getenv("VITE_WATER_HEATER_PARAMETERS"))) or {
     "temperature",
     "target_temperature",
     "is_heating",
@@ -87,26 +90,26 @@ WATER_HEATER_PARAMETERS = {
     "scheduled_on",
     "scheduled_off",
 }
-LIGHT_PARAMETERS = {
+LIGHT_PARAMETERS = set(json.loads(os.getenv("VITE_LIGHT_PARAMETERS"))) or {
     "brightness",
     "color",
     "is_dimmable",
     "dynamic_color",
 }
-AC_PARAMETERS = {
+AC_PARAMETERS = set(json.loads(os.getenv("VITE_AC_PARAMETERS"))) or {
     "temperature",
     "mode",
     "fan_speed",
     "swing",
 }
-AC_MODES = {'cool', 'heat', 'fan'}
-AC_FAN_SETTINGS = {'off', 'low', 'medium', 'high'}
-AC_SWING_MODES = {'off', 'on', 'auto'}
-LOCK_PARAMETERS = {
+AC_MODES = set(json.loads(os.getenv("VITE_AC_MODES"))) or {'cool', 'heat', 'fan'}
+AC_FAN_SETTINGS = set(json.loads(os.getenv("VITE_AC_FAN_SETTINGS"))) or {'off', 'low', 'medium', 'high'}
+AC_SWING_MODES = set(json.loads(os.getenv("VITE_AC_SWING_MODES"))) or {'off', 'on', 'auto'}
+LOCK_PARAMETERS = set(json.loads(os.getenv("VITE_LOCK_PARAMETERS"))) or {
     "auto_lock_enabled",
     "battery_level",
 }
-CURTAIN_PARAMETERS = {
+CURTAIN_PARAMETERS = set(json.loads(os.getenv("VITE_CURTAIN_PARAMETERS"))) or {
     "position",
 }
 
@@ -116,9 +119,8 @@ CURTAIN_PARAMETERS = {
 #                       initial digit of 0 or 1 followed by any digit.
 # : - Colon.
 # ([0-5]\d) - Minutes, 0-5 followed by any digit.
-TIME_REGEX = '^([01][0-9]|2[0-3]):([0-5][0-9])$'
-
-COLOR_REGEX = '^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$'
+TIME_REGEX = os.getenv("VITE_TIME_REGEX", '^([01][0-9]|2[0-3]):([0-5][0-9])(:[0-5][0-9])?$')
+COLOR_REGEX = os.getenv("VITE_COLOR_REGEX", '^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$')
 
 PROMETHEUS_URL = "http://prometheus-svc.smart-home.svc.cluster.local:9090"
 # Prometheus metrics
@@ -168,14 +170,38 @@ lock_battery_level = Gauge("lock_battery_level", "Battery level", ["device_id"])
 curtain_status = Gauge("curtain_status", "Open/closed status", ["device_id", "state"])
 
 
-# For tracking usage
-
-
 def record_on_interval_start(device_id: str) -> None:
+    """
+    Records a new interval during which the device was on.
+
+    This function is called when a device is turned on from being off,
+    or when a device is first seen while being on. It creates a new interval
+    comprised of a length 2 list, its first member being the current UTC time
+    in ISO format, and its second member being None, to be filled later when
+    the device is turned off. It then adds that interval to a Redis data
+    structure.
+
+    :param str device_id: The ID of the device.
+    :return: None
+    :rtype: None
+    """
     r.rpush(f"device_on_intervals:{device_id}", json.dumps([datetime.now(UTC).isoformat(), None]))
 
 
 def record_on_interval_end(device_id: str) -> float | None:
+    """
+    Ends an interval during which the device was on.
+
+    This function is called when a device is turned off from being on. It reads
+    the last on-interval for the given device and replaces the second member,
+    which is assumed to be None, with the current UTC time. It then writes
+    the new interval to the Redis data structure and returns the interval
+    duration in seconds, of an interval was found.
+
+    :param str device_id: The ID of the device.
+    :return: The interval duration in seconds, or None if no interval was found
+    :rtype: float | None
+    """
     key = f"device_on_intervals:{device_id}"
     intervals = r.lrange(key, 0, -1)
     if not intervals:
@@ -575,9 +601,6 @@ def id_exists(device_id):
     device = devices_collection.find_one({"id": device_id}, {'_id': 0})
     return device is not None
 
-
-app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 # Database parameters
 uri = MONGO_DB_CONNECTION_STRING if MONGO_DB_CONNECTION_STRING is not None else (
