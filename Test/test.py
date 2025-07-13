@@ -22,7 +22,7 @@ api_test = False
 frontend_test = False
 simulator_test = False
 
-### ---------- Test 1: API test ----------
+# ---------- Test 1: API test ----------
 response = requests.get(f"{backend_url}/api/devices")
 if 199 < response.status_code < 400:
     print("API is responding")
@@ -56,7 +56,7 @@ else:
     print("Test device deleted successfully")
     api_test = True
 
-### ---------- Test 2: Frontend ----------
+# ---------- Test 2: Frontend ----------
 response = requests.get(FRONTEND_URL)
 if 199 < response.status_code < 400:
     print("Frontend is up")
@@ -65,14 +65,16 @@ else:
     print("Frontend is not up")
     sys.exit(1)
 
-### ---------- Test 3: Simulator MQTT ----------
+# ---------- Test 3: Simulator MQTT ----------
 mqtt_message_received = False
+
 
 def on_message(client, userdata, msg):
     global mqtt_message_received
     print(f"MQTT message received on topic: {msg.topic}")
     mqtt_message_received = True
     client.disconnect()  # Stop loop after receiving
+
 
 client = mqtt.Client()
 client.on_message = on_message
@@ -83,7 +85,7 @@ client.loop_start()
 print("Waiting up to 10 seconds for simulator MQTT message...")
 
 # Wait up to 30 seconds for message
-for _ in range(30): 
+for _ in range(30):
     if mqtt_message_received:
         break
     time.sleep(1)
@@ -97,7 +99,7 @@ else:
     print("Simulator did not publish MQTT messages")
     sys.exit(1)
 
-### ---------- Final result ----------
+# ---------- Final result ----------
 if api_test and frontend_test and simulator_test:
     print("All 3 tests have gone through successfully")
     sys.exit(0)
