@@ -15,6 +15,7 @@ import os
 import time
 import random
 import sys
+import redis
 import logging.handlers
 from prometheus_client import generate_latest
 from services.redis_client import r
@@ -306,7 +307,7 @@ def get_all_devices() -> tuple[Response, int]:
     for device in devices:
         if "id" in device:
             if not r.sismember("seen_devices", device["id"]):
-                mark_device_read(device)
+                mark_device_read(device)  # Assumes that devices in the DB are already validated
     return jsonify(devices), 200
 
 
@@ -452,27 +453,59 @@ def device_analytics() -> tuple[Response, int]:
 
 @app.get("/healthy")
 def health_check():
+    """
+    Health check endpoint for Kubernetes liveness probe.
+
+    This endpoint confirms that the Flask application is up and responding.
+    It does not validate connections to external dependencies like databases
+    or message brokers.
+
+    :return: JSON response indicating the service is running.
+    :rtype: Response
+    """
     return jsonify({"Status": "Healthy"})
 
 
 @app.get("/ready")
 def ready_check():
+    """
+    Readiness check endpoint for Kubernetes readiness probe.
+
+    This endpoint checks whether the application is ready to serve traffic by:
+
+    - Verifying connectivity to the MongoDB database using a ping command.
+    - Checking if the MQTT client is currently connected.
+    - Confirming the Redis client connection with a ping.
+
+    Returns HTTP 200 if all checks succeed, or HTTP 500 if any dependency is not available.
+
+    :return: JSON response indicating the readiness status.
+    :rtype: Response
+    """
     try:
-        app.logger.debug("Pinging DB . . .")
+        app.logger.debug("Pinging MongoDB . . .")
         mongo_client.admin.command('ping')
-        app.logger.debug("Ping successful. Checking MQTT connection")
-        if mqtt.is_connected():
-            app.logger.debug("Connected")
+        app.logger.debug("MongoDB ping successful.")
+
+        app.logger.debug("Checking MQTT connection . . .")
+        if not mqtt.is_connected():
+            app.logger.debug("MQTT not connected")
+            return jsonify({"Status": "Not ready"}), 500
+        app.logger.debug("MQTT connected.")
+
+        app.logger.debug("Pinging Redis . . .")
+        if r.ping():
+            app.logger.debug("Redis ping successful.")
             return jsonify({"Status": "Ready"})
         else:
-            app.logger.debug("Not connected")
+            app.logger.debug("Redis ping failed.")
             return jsonify({"Status": "Not ready"}), 500
-    except (ConnectionFailure, OperationFailure):
-        app.logger.exception("Ping failed")
+
+    except (ConnectionFailure, OperationFailure, redis.exceptions.ConnectionError):
+        app.logger.exception("Dependency check failed.")
         return jsonify({"Status": "Not ready"}), 500
 
 
-# Adds required headers to the response
 @app.after_request
 def after_request_combined(response):
     """

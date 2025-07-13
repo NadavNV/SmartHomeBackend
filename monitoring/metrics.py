@@ -4,10 +4,9 @@ import json
 import requests
 from datetime import datetime, UTC, timedelta
 from flask import jsonify, request, Response
-from typing import Any, Mapping, Union
+from typing import Any, Mapping
 from prometheus_client import Gauge, Counter, Histogram
 from services.redis_client import r
-from validation.validators import validate_device_data, validate_new_device_data
 
 logger = logging.getLogger("smart_home.monitoring.metrics")
 
@@ -147,13 +146,12 @@ def update_device_status(device: Mapping[str, Any], new_status: str) -> None:
         1 if new_status in {"on", "locked", "closed"} else 0)
 
 
-def flip_device_boolean_flag(metric: Gauge, device_id: str, flag: str, new_value: bool) -> None:
+def flip_device_boolean_flag(metric: Gauge, device_id: str, new_value: bool) -> None:
     """
     Records flipping a boolean flag on the device.
 
     :param Gauge metric: The metric recording the boolean flag.
     :param str device_id: ID of the device.
-    :param str flag: The name of the boolean flag.
     :param bool new_value: The new value of the boolean flag.
     :return: None
     :rtype: None
@@ -194,8 +192,8 @@ def mark_device_read(device: Mapping[str, Any]) -> tuple[bool, str | None]:
     """
     Marks a device as seen when read for the first time from the Mongo database.
 
-    If the device is indeed new and its data is valid, create new 0 value metrics for
-    its total on time and total on events.
+    If the device is indeed new, create new 0 value metrics for its total on time and total on events.
+    This function assumes that the device's data has already been validated.
 
     :param Mapping[str, Any] device: The device to mark as seen.
     :return: A tuple of a boolean value indicating success and an optional reason for failure,
@@ -206,23 +204,29 @@ def mark_device_read(device: Mapping[str, Any]) -> tuple[bool, str | None]:
     device_id = device.get("id")
     if device_id is not None and not r.sismember("seen_devices", device_id):
         logger.info(f"Device {device_id} read from DB for the first time. Validating device {device}:")
-        success, reason = validate_new_device_data(device)
-        if success:
-            logger.info(f"Success. Adding metrics for device {device_id}")
-            device_on_events.labels(device_id=device_id, device_type=device["type"]).inc(0)
-            device_usage_seconds.labels(device_id=device_id, device_type=device["type"]).inc(0)
-            update_device_metrics(device, device)
-            for key, value in device["parameters"].items():
-                device_metrics_action(device, key, value)
-            r.sadd("seen_devices", device_id)
-            return True, None
-        else:
-            return False, reason
+        logger.info(f"Success. Adding metrics for device {device_id}")
+        device_on_events.labels(device_id=device_id, device_type=device["type"]).inc(0)
+        device_usage_seconds.labels(device_id=device_id, device_type=device["type"]).inc(0)
+        update_device_metrics(device, device)
+        for key, value in device["parameters"].items():
+            update_device_parameter(device, key, value)
+        r.sadd("seen_devices", device_id)
+        return True, None
     else:
         return False, f"Device {device_id} already read."
 
 
 def update_device_metrics(old_device: Mapping[str, Any], updated_device: Mapping[str, Any]) -> None:
+    """
+    Updates the device's metrics based on the received updated configuration.
+
+    This function assumes that the new configuration has already been validated.
+
+    :param Mapping[str, Any] old_device: Current device configuration.
+    :param Mapping[str, Any] updated_device: Updated device configuration.
+    :return: None
+    :rtype: None
+    """
     for key, value in updated_device.items():
         logger.info(f"Setting parameter '{key}' to value '{value}'")
         match key:
@@ -243,129 +247,113 @@ def update_device_metrics(old_device: Mapping[str, Any], updated_device: Mapping
             case "status":
                 update_device_status(old_device, value)
             case "parameters":
-                device_metrics_action(old_device, key, value)
+                for param, param_value in value.items():
+                    update_device_parameter(old_device, param, param_value)
 
 
-def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tuple[bool, str | None]:
-    # Update metrics
+def update_device_parameter(device: Mapping[str, Any], param: str, param_value: Any) -> None:
+    """
+    Updates the metrics of a specific parameter based on the given new value.
+
+    This function assumes that the new configuration has already been validated.
+
+    :param Mapping[str, Any] device: Current device configuration
+    :param str param: The parameter being updated
+    :param str param_value: The updated value
+    :return: None
+    :rtype: None
+    """
     match device["type"]:
         case "water_heater":
-            match key:
+            match param:
                 case "temperature":
                     water_heater_temperature.labels(
                         device_id=device["id"],
-                    ).set(value)
+                    ).set(param_value)
                 case "target_temperature":
                     water_heater_target_temperature.labels(
                         device_id=device["id"],
-                    ).set(value)
+                    ).set(param_value)
                 case "is_heating":
                     flip_device_boolean_flag(
                         metric=water_heater_is_heating_status,
-                        new_value=value,
+                        new_value=param_value,
                         device_id=device["id"],
-                        flag=key,
                     )
                 case "timer_enabled":
                     flip_device_boolean_flag(
                         metric=water_heater_timer_enabled_status,
-                        new_value=value,
+                        new_value=param_value,
                         device_id=device["id"],
-                        flag=key,
                     )
                 case "scheduled_on":
                     water_heater_schedule_info.labels(
                         device_id=device["id"],
-                        scheduled_on=value,
+                        scheduled_on=param_value,
                         scheduled_off=device["parameters"]["scheduled_off"],
                     ).set(1)
                 case "scheduled_off":
                     water_heater_schedule_info.labels(
                         device_id=device["id"],
                         scheduled_on=device["parameters"]["scheduled_on"],
-                        scheduled_off=value,
+                        scheduled_off=param_value,
                     )
-                case _:
-                    error = f"Unknown parameter '{key}'"
-                    logger.error(error)
-                    return False, error
         case "light":
-            match key:
+            match param:
                 case "brightness":
                     light_brightness.labels(
                         device_id=device["id"],
                         is_dimmable=str(device["parameters"]["is_dimmable"]),
-                    ).set(value)
+                    ).set(param_value)
                 case "color":
                     light_color.labels(
                         device_id=device["id"],
                         dynamic_color=str(device["parameters"]["dynamic_color"]),
-                    ).set(int("0x" + value[1:], 16))
+                    ).set(int("0x" + param_value[1:], 16))
                 case "is_dimmable" | "dynamic_color":
                     # Read-only parameter, not tracking in metrics
                     pass
-                case _:
-                    error = f"Unknown parameter '{key}'"
-                    logger.error(error)
-                    return False, error
         case "air_conditioner":
-            match key:
+            match param:
                 case "temperature":
                     ac_temperature.labels(
                         device_id=device["id"],
-                    ).set(value)
+                    ).set(param_value)
                 case "mode":
                     modes = ["cool", "heat", "fan"]
                     for mode in modes:
                         ac_mode_status.labels(
                             device_id=device["id"],
                             mode=mode,
-                        ).set(1 if mode == value else 0)
+                        ).set(1 if mode == param_value else 0)
                 case "fan_speed":
                     modes = ["off", "low", "medium", "high"]
                     for mode in modes:
                         ac_fan_status.labels(
                             device_id=device["id"],
-                            mode=value,
-                        ).set(1 if mode == value else 0)
+                            mode=param_value,
+                        ).set(1 if mode == param_value else 0)
                 case "swing":
                     modes = ["off", "on", "auto"]
                     for mode in modes:
                         ac_swing_status.labels(
                             device_id=device["id"],
-                            mode=value,
-                        ).set(1 if mode == value else 0)
-                case _:
-                    error = f"Unknown parameter '{key}'"
-                    logger.error(error)
-                    return False, error
+                            mode=param_value,
+                        ).set(1 if mode == param_value else 0)
         case "door_lock":
-            match key:
+            match param:
                 case "auto_lock_enabled":
                     # Read-only parameter, not tracked in metrics
                     pass
                 case "battery_level":
                     lock_battery_level.labels(
                         device_id=device["id"],
-                    ).set(value)
-                case _:
-                    error = f"Unknown parameter '{key}'"
-                    logger.error(error)
-                    return False, error
+                    ).set(param_value)
         case "curtain":
-            match key:
+            match param:
                 case "position":
                     # Read-only parameter, not tracked in metrics
                     pass
-                case _:
-                    error = f"Unknown parameter '{key}'"
-                    logger.error(error)
-                    return False, error
-        case _:
-            error = f"Unknown device type '{device['type']}'"
-            logger.error(error)
-            return False, error
-    return True, None
 
 
 def query_prometheus(query: str) -> list[dict[str, Any]] | dict[str, str]:
@@ -381,11 +369,11 @@ def query_prometheus(query: str) -> list[dict[str, Any]] | dict[str, str]:
     :rtype: list[dict[str, Any]] | dict[str, str]
     """
     try:
-        logger.debug(f"Querying Prometheus: {query}")
+        logger.info(f"Querying Prometheus: {query}")
         resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=5)
         resp.raise_for_status()
         data = resp.json()
-        logger.debug(f"Prometheus response for query '{query}': {data}")
+        logger.info(f"Prometheus response for query '{query}': {data}")
         return data.get("data", {}).get("result", [])
     except requests.RequestException as e:
         logger.exception(f"Error querying Prometheus for query '{query}'")
@@ -412,7 +400,7 @@ def query_prometheus_range(metric: str, start: datetime, end: datetime, step: st
             "end": end.isoformat(),
             "step": step
         }
-        logger.debug(f"Querying Prometheus range: {params}")
+        logger.info(f"Querying Prometheus range: {params}")
         resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query_range", params=params, timeout=5)
         resp.raise_for_status()
         data = resp.json()
@@ -441,7 +429,7 @@ def query_prometheus_point_increase(metric: str, start: datetime, end: datetime)
             "query": query,
             "time": end.isoformat()  # run instant query at the end of window
         }
-        logger.debug(f"Querying Prometheus point increase: {params}")
+        logger.info(f"Querying Prometheus point increase: {params}")
         resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params=params, timeout=5)
         resp.raise_for_status()
         data = resp.json()
@@ -460,7 +448,7 @@ def generate_analytics() -> tuple[Response, int]:
     """
     try:
         body = request.get_json(silent=True) or {}
-        logger.debug(f"Received analytics request body: {body}")
+        logger.info(f"Received analytics request body: {body}")
 
         to_ts = datetime.fromisoformat(body.get("to")) if "to" in body else datetime.now(UTC)
         from_ts = datetime.fromisoformat(body.get("from")) if "from" in body else to_ts - timedelta(days=7)
@@ -487,7 +475,7 @@ def generate_analytics() -> tuple[Response, int]:
                 continue
             device_id = item["metric"].get("device_id", "unknown")
             usage_seconds = float(item["value"][1])
-            logger.debug(f"Device {device_id} usage seconds: {usage_seconds}")
+            logger.info(f"Device {device_id} usage seconds: {usage_seconds}")
             device_analytics_json.setdefault(device_id, {})["total_usage_minutes"] = usage_seconds / 60
             # Include currently on devices that haven't been added to the metric yet
             interval = get_device_on_interval_at_time(device_id, to_ts)
@@ -506,7 +494,7 @@ def generate_analytics() -> tuple[Response, int]:
                 continue
             device_id = item["metric"].get("device_id", "unknown")
             on_count = int(float(item["value"][1]))
-            logger.debug(f"Device {device_id} on count: {on_count}")
+            logger.info(f"Device {device_id} on count: {on_count}")
             device_analytics_json.setdefault(device_id, {})["on_events"] = on_count
 
         total_usage = sum(d.get("total_usage_minutes", 0) for d in device_analytics_json.values())
@@ -526,7 +514,7 @@ def generate_analytics() -> tuple[Response, int]:
             "message": "For full analytics, charts, and trends, visit the Grafana dashboard."
         }
 
-        logger.debug(f"Returning analytics response: {response}")
+        logger.info(f"Returning analytics response: {response}")
         return jsonify(response), 200
     except Exception as e:
         logger.exception("Unexpected error in /api/devices/analytics")
