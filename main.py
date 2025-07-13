@@ -17,7 +17,7 @@ import random
 import sys
 import logging.handlers
 from prometheus_client import generate_latest
-from services.redis_client import r  # TODO: Add to dockerfile
+from services.redis_client import r
 
 # Validation
 from validation.validators import validate_device_data, validate_new_device_data
