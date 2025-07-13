@@ -810,7 +810,7 @@ def on_connect(client, _userdata, _connect_flags, reason_code, _properties) -> N
     app.logger.info(f'CONNACK received with code {reason_code}.')
     if reason_code == 0:
         app.logger.info("Connected successfully")
-        client.subscribe("project/home/#")
+        client.subscribe("$share/backend/nadavnv-smart-home/devices/#")
     else:
         app.logger.error(f"Connection failed with code {reason_code}")
 
@@ -841,7 +841,7 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage):
         app.logger.exception(f"Error decoding payload: {e.reason}")
         return
     payload = payload["contents"]
-    # Extract device_id from topic: expected format project/home/<device_id>/<method>
+    # Extract device_id from topic: expected format nadavnv-smart-home/devices/<device_id>/<method>
     topic_parts = msg.topic.split('/')
     if len(topic_parts) == 4:
         device_id = topic_parts[2]
@@ -851,6 +851,8 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage):
             app.logger.error(f"Device ID {device_id} not found")
             return
         match method:
+            # TODO: Fold action into update
+            # TODO: Validate all parameters before updating metrics
             case "action":
                 # Only update device parameters
                 if not validate_action_parameters(device['type'], payload):
@@ -929,7 +931,7 @@ mqtt.loop_start()
 
 # Formats and publishes the mqtt topic and payload -> the mqtt publisher
 def publish_mqtt(contents: dict, device_id: str, method: str):
-    topic = f"project/home/{device_id}/{method}"
+    topic = f"nadavnv-smart-home/devices/{device_id}/{method}"
     payload = json.dumps({
         "sender": "backend",
         "contents": contents,
@@ -1019,6 +1021,7 @@ def delete_device(device_id):
 # Changes a device configuration (i.e. name, room, or status) or adds a new configuration
 @app.put("/api/devices/<device_id>")
 def update_device(device_id):
+    # TODO: Validate all parameters before updating metrics
     updated_device = request.json
     # Remove ID from the received device, to ensure it doesn't overwrite an existing ID
     id_to_update = updated_device.pop("id", None)
@@ -1054,6 +1057,8 @@ def update_device(device_id):
 # and their new values.
 @app.post("/api/devices/<device_id>/action")
 def rt_action(device_id):
+    # TODO: Fold action into update
+    # TODO: Validate all parameters before updating metrics
     action = request.json
     app.logger.info(f"Device action {device_id}")
     device = devices_collection.find_one(filter={"id": device_id}, projection={'_id': 0})
