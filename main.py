@@ -1,6 +1,7 @@
+import config.env  # noqa: F401  # load_dotenv side effect
 from flask import Flask, jsonify, request, Response
 from werkzeug.middleware.proxy_fix import ProxyFix
-from typing import Any, cast, Mapping, Union
+from typing import Any, cast, Mapping
 import paho.mqtt.client as paho
 from paho.mqtt.properties import Properties
 from paho.mqtt.packettypes import PacketTypes
@@ -10,35 +11,25 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure
 from dotenv import load_dotenv
-from datetime import datetime, timedelta, UTC
-import re
 import os
 import time
 import random
 import sys
-import requests
 import logging.handlers
 from prometheus_client import generate_latest
 from services.redis_client import r
 
 # Validation
-from validation.validators import (
-    validate_action_parameters,
-    validate_device_data,
-)
+from validation.validators import validate_device_data, validate_new_device_data
 
 # Monitoring
 from monitoring.metrics import (
     request_count,
     request_latency,
-    update_binary_device_status,
-    get_device_on_interval_at_time,
     mark_device_read,
-    device_metrics_action,
     update_device_metrics,
-    query_prometheus,
-    query_prometheus_point_increase,
-    query_prometheus_range
+    generate_analytics,
+    update_device_status,
 )
 
 logging.basicConfig(
@@ -57,8 +48,11 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
+smart_home_logger = logging.getLogger("smart_home")
+smart_home_logger.propagate = True
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+app.logger.propagate = False
 
 # Env variables
 load_dotenv("/config/constants.env")
@@ -73,13 +67,6 @@ BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 MONGO_DB_CONNECTION_STRING = os.getenv("MONGO_DB_CONNECTION_STRING")
 MONGO_USER = os.getenv("MONGO_USER")
 MONGO_PASS = os.getenv("MONGO_PASS")
-
-
-# Checks the validity of the device id
-def id_exists(device_id):
-    device = devices_collection.find_one({"id": device_id}, {'_id': 0})
-    return device is not None
-
 
 # Database parameters
 uri = MONGO_DB_CONNECTION_STRING if MONGO_DB_CONNECTION_STRING is not None else (
@@ -110,8 +97,19 @@ client_id = f"flask-backend-{os.getenv('HOSTNAME')}"
 mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2, protocol=paho.MQTTv5, client_id=client_id)
 
 
-# Function to run after the MQTT client finishes connecting to the broker
-def on_connect(client, _userdata, _connect_flags, reason_code, _properties) -> None:
+def on_connect(client: paho.Client, _userdata, _connect_flags, reason_code, _properties) -> None:
+    """
+    Function to run after the MQTT client finishes connecting to the broker. Logs the
+    connection and subscribes to the project topic.
+
+    :param paho.Client client: The MQTT client instance for this callback.
+    :param _userdata: Unused by this function.
+    :param _connect_flags: Unused by this function.
+    :param reason_code: The connection reason code received from the broker.
+    :param _properties: Unused by this function.
+    :return: None
+    :rtype: None
+    """
     app.logger.info(f'CONNACK received with code {reason_code}.')
     if reason_code == 0:
         app.logger.info("Connected successfully")
@@ -121,21 +119,44 @@ def on_connect(client, _userdata, _connect_flags, reason_code, _properties) -> N
 
 
 def on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
+    """
+    Function to run after the MQTT client disconnects.
+
+    :param _client: Unused by this function.
+    :param _userdata: Unused by this function.
+    :param _disconnect_flags: Unused by this function.
+    :param reason_code: The disconnection reason code possibly received from the broker.
+    :param _properties: Unused by this function.
+    :return: None
+    :rtype: None
+    """
     app.logger.warning(f"Disconnected from broker with reason: {reason_code}")
 
 
-# Receives the published mqtt payloads and updates the database accordingly
-def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage):
-    sender_id = None
+def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
+    """
+    Receives the published MQTT payloads and updates the database accordingly.
+
+    Validates the device data and updates metrics and the database if it's valid.
+
+    :param _mqtt_client: Unused by this function.
+    :param _userdata: Unused by this function.
+    :param paho.MQTTMessage msg: The MQTT message received from the broker.
+    :return: None
+    :rtype: None
+    """
+    sender_id, sender_group = None, None
     props = msg.properties
     user_props = getattr(props, "UserProperty", None)
     if user_props is not None:
         sender_id = dict(user_props).get("sender_id")
-
+        sender_group = dict(user_props).get("sender_group")
     if sender_id is None:
         app.logger.error("Message missing sender")
-
-    if sender_id == client_id:
+    if sender_group is None:
+        app.logger.error("Message missing sender group")
+    if sender_id == client_id or sender_group == "backend":
+        # Ignore backend messages
         return
 
     app.logger.info(f"MQTT Message Received on {msg.topic}")
@@ -156,48 +177,21 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage):
             app.logger.error(f"Device ID {device_id} not found")
             return
         match method:
-            # TODO: Fold action into update
-            # TODO: Validate all parameters before updating metrics
-            case "action":
-                # Only update device parameters
-                if not validate_action_parameters(device['type'], payload):
-                    return
-                update_fields = {}
-                for key, value in payload.items():
-                    app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-                    success, reason = device_metrics_action(device, key, value)
-                    if not success:
-                        return
-                    update_fields[f"parameters.{key}"] = value
-                devices_collection.update_one(
-                    {"id": device_id},
-                    {"$set": update_fields}
-                )
-                return
             case "update":
-                # Only update device configuration (i.e. name, status, and room)
+                # Update an existing device
                 if "id" in payload and payload["id"] != device_id:
                     app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
                     return
-                # Make sure that this endpoint is only used to update specific fields
-                allowed_fields = ['room', 'name', 'status']
-                for field in payload:
-                    if field not in allowed_fields:
-                        app.logger.error(f"Incorrect field in update method: {field}")
-                        return
-                update_device_metrics(device, payload)
-                # Find device by id and update the fields with 'set'
-                devices_collection.update_one(
-                    {"id": device_id},
-                    {"$set": payload}
-                )
-                return
+                success, reason = validate_device_data(device)
+                if success:
+                    update_device(device, payload)
+                    return
             case "post":
                 # Add a new device to the database
                 if "id" in payload and payload["id"] != device_id:
                     app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
                     return
-                success, reason = validate_device_data(payload)
+                success, reason = validate_new_device_data(payload)
                 if success:
                     if id_exists(payload["id"]):
                         app.logger.error("ID already exists")
@@ -205,18 +199,18 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage):
                     devices_collection.insert_one(payload)
                     app.logger.info("Device added successfully")
                     return
-                app.logger.error(f"Missing required field {reason}")
-                return
+                else:
+                    return
             case "delete":
                 # Remove a device from the database
                 if id_exists(device_id):
                     if device["status"] == "on":
                         # Calculate device usage, etc.
-                        update_binary_device_status(device, "off")
+                        update_device_status(device, "off")
                     devices_collection.delete_one({"id": device_id})
                     app.logger.info("Device deleted successfully")
                     return
-                app.logger.error("ID not found")
+                app.logger.error(f"ID {device_id} not found")
                 return
             case _:
                 app.logger.error(f"Unknown method: {method}")
@@ -234,83 +228,142 @@ mqtt.connect_async(BROKER_HOST, BROKER_PORT)
 mqtt.loop_start()
 
 
-# Formats and publishes the mqtt topic and payload -> the mqtt publisher
-def publish_mqtt(contents: dict, device_id: str, method: str):
+def publish_mqtt(contents: dict[str, Any], device_id: str, method: str) -> None:
+    """
+    Publishes the MQTT message to the broker.
+
+    Formats the message and adds appropriate sender id and sender group tags.
+
+    :param dict[str, Any] contents: The message to be published.
+    :param str device_id: ID of the device the message is about.
+    :param str method: The method to attach to the topic, either "update", "post" or "delete".
+    :return: None
+    :rtype: None
+    """
     topic = f"nadavnv-smart-home/devices/{device_id}/{method}"
     payload = json.dumps({
-        "sender": "backend",
         "contents": contents,
     })
     properties = Properties(PacketTypes.PUBLISH)
-    properties.UserProperty = [("sender_id", client_id)]
-    mqtt.publish(topic, payload.encode(), qos=2, properties=properties)
+    properties.UserProperty = [("sender_id", client_id), ("sender_group", "backend")]
+    mqtt.publish(topic, payload.encode("utf-8"), qos=2, properties=properties)
+
+
+def id_exists(device_id: str) -> bool:
+    """
+    Check if a device ID exists in the Mongo database.
+
+    :param str device_id: Device ID to check.
+    :return: True if the device ID exists, False otherwise.
+    :rtype: bool
+    """
+    device = devices_collection.find_one({"id": device_id}, {'_id': 0})
+    return device is not None
 
 
 @app.before_request
-def before_request():
+def before_request() -> None:
+    """
+    Function to run before each request. Used for calculating message latency.
+
+    :return: None
+    :rtype: None
+    """
     request.start_time = time.time()
 
 
-@app.route("/metrics")
-def metrics():
-    return Response(generate_latest(), mimetype="text/plain")
+@app.get("/metrics")
+def metrics() -> tuple[Response, int]:
+    """
+    Used by Prometheus to get gathered metrics.
+
+    :return: The gathered metrics in plain text.
+    :rtype: Response
+    """
+    return Response(generate_latest(), mimetype="text/plain"), 200
 
 
-# Returns a list of device IDs
 @app.get("/api/ids")
-def get_device_ids():
+def get_device_ids() -> tuple[Response, int]:
+    """
+    Returns a list of all device IDs currently in the Mongo database.
+
+    :return: List of device IDs.
+    :rtype: tuple[Response, int]
+    """
     device_ids = list(devices_collection.find({}, {'id': 1, '_id': 0}))
-    return [device_id['id'] for device_id in device_ids]
+    return jsonify([device_id['id'] for device_id in device_ids]), 200
 
 
-# Presents a list of all your devices and their configuration
 @app.get("/api/devices")
-def get_all_devices():
+def get_all_devices() -> tuple[Response, int]:
+    """
+    Returns a list of all devices currently in the Mongo database and their details.
+    :return: List of devices.
+    :rtype: tuple[Response, int]
+    """
     devices = list(devices_collection.find({}, {'_id': 0}))
     for device in devices:
         if "id" in device:
             if not r.sismember("seen_devices", device["id"]):
                 mark_device_read(device)
-    return jsonify(devices)
+    return jsonify(devices), 200
 
 
-# Get data on a specific device by its ID
 @app.get("/api/devices/<device_id>")
-def get_device(device_id):
+def get_device(device_id) -> tuple[Response, int]:
+    """
+    Returns a single device from the Mongo database.
+    :param device_id:
+    :return:
+    """
     device = devices_collection.find_one({'id': device_id}, {'_id': 0})
-    if "id" in device:
+    if device is not None:
         if not r.sismember("seen_devices", device["id"]):
             mark_device_read(device)
-    if device is not None:
-        return jsonify(device)
-    app.logger.error(f"ID {device_id} not found")
-    return jsonify({'error': f"ID {device_id} not found"}), 400
+        return jsonify(device), 200
+    else:
+        app.logger.error(f"ID {device_id} not found")
+        return jsonify({'error': f"ID {device_id} not found"}), 400
 
 
-# Adds a new device
 @app.post("/api/devices")
-def add_device():
+def add_device() -> tuple[Response, int]:
+    """
+    Adds a new device to the Mongo database.
+
+    Returns {'output': "Device added successfully"} on success and {'error': <reason>} on failure.
+    :return: Response.
+    :rtype: tuple[Response, int]
+    """
     new_device = request.json
-    success, reason = validate_device_data(new_device)
+    success, reason = validate_new_device_data(new_device)
     if success:
         if id_exists(new_device["id"]):
-            return jsonify({'error': "ID already exists"}), 400
-        devices_collection.insert_one(new_device)
-        mark_device_read(new_device)
-        # Remove MongoDB unique id (_id) before publishing to mqtt
-        new_device.pop("_id", None)
-        publish_mqtt(
-            contents=new_device,
-            device_id=new_device['id'],
-            method="post",
-        )
-        return jsonify({'output': "Device added successfully"}), 200
-    return jsonify({'error': f'Missing required field {reason}'}), 400
+            return jsonify({'error': f"ID {new_device["id"]} already exists"}), 400
+        else:
+            devices_collection.insert_one(new_device)
+            mark_device_read(new_device)
+            publish_mqtt(
+                contents=new_device,
+                device_id=new_device['id'],
+                method="post",
+            )
+            return jsonify({'output': "Device added successfully"}), 200
+    else:
+        return jsonify({'error': f'{reason}'}), 400
 
 
-# Deletes a device from the device list
 @app.delete("/api/devices/<device_id>")
-def delete_device(device_id):
+def delete_device(device_id: str) -> tuple[Response, int]:
+    """
+    Deletes a device from the Mongo database.
+
+    Returns {'output': "Device was deleted from the database"} on success and {'error': <reason>} on failure.
+    :param str device_id: ID of the device to delete.
+    :return: Response.
+    :rtype: tuple[Response, int]
+    """
     if id_exists(device_id):
         r.srem("seen_devices", device_id)  # Allows adding a new device with old id
         devices_collection.delete_one({"id": device_id})
@@ -323,151 +376,78 @@ def delete_device(device_id):
     return jsonify({"error": "ID not found"}), 404
 
 
-# Changes a device configuration (i.e. name, room, or status) or adds a new configuration
+def update_device(old_device: Mapping[str, Any], updated_device: Mapping[str, Any]) -> None:
+    """
+    Updates a device to a new configuration in the Mongo database and in the Prometheus metrics.
+
+    :param Mapping[str, Any] old_device: Previous device configuration
+    :param Mapping[str, Any] updated_device: New device configuration
+    :return: None
+    :rtype: None
+    """
+    update_device_metrics(old_device, updated_device)
+    update_fields = {}
+    for key, value in updated_device.items():
+        if key != "parameters":
+            update_fields[key] = value
+        else:
+            for param, param_value in updated_device[key].items():
+                update_fields[f"parameters.{param}"] = param_value
+    # Find device by id and update the fields with 'set'
+    devices_collection.update_one(
+        {"id": old_device["id"]},
+        {"$set": update_fields}
+    )
+
+
 @app.put("/api/devices/<device_id>")
-def update_device(device_id):
+def update_device_endpoint(device_id: str) -> tuple[Response, int]:
+    """
+    Updates a device in the Mongo database. A JSON object representing the new device configuration
+    must be included in the request body.
+
+    Validates the new device configuration and updates the database if it is valid, returning
+    {'output': "Device updated successfully"}, or {'error': <reason>} on failure.
+
+    :param str device_id: ID of the device to update.
+    :return: Response.
+    :rtype: tuple[Response, int]
+    """
     # TODO: Validate all parameters before updating metrics
     updated_device = request.json
     # Remove ID from the received device, to ensure it doesn't overwrite an existing ID
     id_to_update = updated_device.pop("id", None)
-    if id_to_update and id_to_update != device_id:
-        app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {id_to_update}")
-        return jsonify({'error': f"ID mismatch: ID in URL: {device_id}, ID in payload: {id_to_update}"}), 400
-    # Make sure that this endpoint is only used to update specific fields
-    allowed_fields = ['room', 'name', 'status']
-    for field in updated_device:
-        if field not in allowed_fields:
-            app.logger.error(f"Incorrect field in update endpoint: {field}")
-            return jsonify({'error': f"Incorrect field in update endpoint: {field}"}), 400
-    if id_exists(device_id):
-        app.logger.info(f"Updating device {device_id}")
-        device = devices_collection.find_one({'id': device_id}, {'_id': 0})
-        update_device_metrics(device, updated_device)
-        # Find device by id and update the fields with 'set'
-        devices_collection.update_one(
-            {"id": device_id},
-            {"$set": updated_device}
-        )
-        publish_mqtt(
-            contents=updated_device,
-            device_id=device_id,
-            method="update",
-        )
-        return jsonify({'output': "Device updated successfully"}), 200
-    return jsonify({'error': "Device not found"}), 404
-
-
-# Sends a real time action to one of the devices.
-# The request's JSON contains the parameters to update
-# and their new values.
-@app.post("/api/devices/<device_id>/action")
-def rt_action(device_id):
-    # TODO: Fold action into update
-    # TODO: Validate all parameters before updating metrics
-    action = request.json
-    app.logger.info(f"Device action {device_id}")
-    device = devices_collection.find_one(filter={"id": device_id}, projection={'_id': 0})
-    if device is None:
-        app.logger.error(f"ID {device_id} not found")
-        return jsonify({'error': "ID not found"}), 404
-    if not validate_action_parameters(device['type'], action):
-        return jsonify({'error': f"Incorrect field in update endpoint or unknown device type"}), 400
-    update_fields = {}
-    for key, value in action.items():
-        app.logger.info(f"Setting parameter '{key}' to value '{value}'")
-        success, reason = device_metrics_action(device, key, value)
-        if not success:
-            return jsonify({'error': reason}), 400
-        update_fields[f"parameters.{key}"] = value
-    devices_collection.update_one(
-        {"id": device_id},
-        {"$set": update_fields}
-    )
-    publish_mqtt(
-        contents=action,
-        device_id=device_id,
-        method="action",
-    )
-    return jsonify({'output': "Action applied to device and published via MQTT"}), 200
+    if id_to_update is not None and id_to_update != device_id:
+        error = f"ID mismatch: ID in URL: {device_id}, ID in payload: {id_to_update}"
+        app.logger.error(error)
+        return jsonify({'error': error}), 400
+    device = devices_collection.find_one({'id': device_id}, {'_id': 0})
+    if device is not None:
+        app.logger.info("Validating new device configuration...")
+        success, reason = validate_device_data(updated_device)
+        if success:
+            app.logger.info(f"Success! Updating device {device_id}")
+            update_device(device, updated_device)
+            publish_mqtt(
+                contents=updated_device,
+                device_id=device_id,
+                method="update",
+            )
+            return jsonify({'output': "Device updated successfully"}), 200
+        else:
+            return jsonify({'error': f"{reason}"}), 400
+    return jsonify({'error': f"Device ID {device_id} not found"}), 404
 
 
 @app.get("/api/devices/analytics")
-def device_analytics():
-    try:
-        body = request.get_json(silent=True) or {}
-        app.logger.debug(f"Received analytics request body: {body}")
+def device_analytics() -> tuple[Response, int]:
+    """
+    Generates a json object of aggregate and individual device metrics.
 
-        now = datetime.now(UTC)
-        to_ts = datetime.fromisoformat(body.get("to")) if "to" in body else now
-        from_ts = datetime.fromisoformat(body.get("from")) if "from" in body else to_ts - timedelta(days=7)
-
-        # Safety check
-        if from_ts >= to_ts:
-            return jsonify({"error": "'from' must be before 'to'"}), 400
-
-        usage_results = query_prometheus_point_increase("device_usage_seconds_total", from_ts, to_ts)
-        event_results = query_prometheus_point_increase("device_on_events_total", from_ts, to_ts)
-
-        if isinstance(usage_results, dict) and "error" in usage_results:
-            app.logger.error(f"Prometheus usage query failed: {usage_results['error']}")
-            return jsonify({"error": "Failed to query Prometheus", "details": usage_results["error"]}), 500
-        if isinstance(event_results, dict) and "error" in usage_results:
-            app.logger.error(f"Prometheus usage query failed: {event_results['error']}")
-            return jsonify({"error": "Failed to query Prometheus", "details": event_results["error"]}), 500
-
-        device_analytics_json = {}
-
-        for item in usage_results:
-            if "value" not in item:
-                app.logger.warning(f"Missing 'value' in usage result: {item}")
-                continue
-            device_id = item["metric"].get("device_id", "unknown")
-            usage_seconds = float(item["value"][1])
-            app.logger.info(f"Device {device_id} usage seconds: {usage_seconds}")
-            device_analytics_json.setdefault(device_id, {})["total_usage_minutes"] = usage_seconds / 60
-            # Include currently on devices that haven't been added to the metric yet
-            interval = get_device_on_interval_at_time(device_id, to_ts)
-            if interval:
-                on_time, off_time = interval
-                effective_start = max(on_time, from_ts)
-                effective_end = min(off_time or to_ts, to_ts)
-                extra_seconds = (effective_end - effective_start).total_seconds()
-                if device_id in device_analytics_json:
-                    device_analytics_json[device_id]["total_usage_minutes"] += extra_seconds / 60
-                else:
-                    device_analytics_json[device_id] = {"total_usage_minutes": extra_seconds / 60}
-        for item in event_results:
-            if "value" not in item:
-                app.logger.warning(f"Missing 'value' in event result: {item}")
-                continue
-            device_id = item["metric"].get("device_id", "unknown")
-            on_count = int(float(item["value"][1]))
-            app.logger.info(f"Device {device_id} on count: {on_count}")
-            device_analytics_json.setdefault(device_id, {})["on_events"] = on_count
-
-        app.logger.info(json.dumps(device_analytics_json, indent=4, sort_keys=True))
-        total_usage = sum(d.get("total_usage_minutes", 0) for d in device_analytics_json.values())
-        total_on_events = sum(d.get("on_events", 0) for d in device_analytics_json.values())
-
-        response = {
-            "analytics_window": {
-                "from": from_ts.isoformat(),
-                "to": to_ts.isoformat()
-            },
-            "aggregate": {
-                "total_devices": r.scard("seen_devices"),
-                "total_on_events": total_on_events,
-                "total_usage_minutes": total_usage
-            },
-            "on_devices": device_analytics_json,
-            "message": "For full analytics, charts, and trends, visit the Grafana dashboard."
-        }
-
-        app.logger.debug(f"Returning analytics response: {response}")
-        return jsonify(response)
-    except Exception as e:
-        app.logger.exception("Unexpected error in /api/devices/analytics")
-        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+    :return: A flask Response object and an HTTP status code.
+    :rtype: tuple[Response, int]
+    """
+    return generate_analytics()
 
 
 @app.get("/healthy")
@@ -495,6 +475,13 @@ def ready_check():
 # Adds required headers to the response
 @app.after_request
 def after_request_combined(response):
+    """
+    Function to run just before the HTTP response is sent. Used to calculate HTTP metrics
+    and to add response headers.
+
+    :param response: The HTTP response to send.
+    :return: The modified HTTP response.
+    """
     # Prometheus tracking
     if hasattr(request, 'start_time'):
         duration = time.time() - request.start_time
@@ -510,12 +497,19 @@ def after_request_combined(response):
     return response
 
 
-# Function to run when shutting down the server
 @atexit.register
-def on_shutdown():
+def on_shutdown() -> None:
+    """
+    Function to run when shutting down the server. Disconnects from MQTT broker
+    and DB clients.
+
+    :return: None
+    :rtype: None
+    """
     mqtt.loop_stop()
     mqtt.disconnect()
     mongo_client.close()
+    r.close()
     app.logger.info("Shutting down")
 
 

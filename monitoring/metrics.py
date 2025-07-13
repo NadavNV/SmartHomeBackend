@@ -1,12 +1,15 @@
+import config.env  # noqa: F401  # load_dotenv side effect
 import logging
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, UTC, timedelta
+from flask import jsonify, request, Response
 from typing import Any, Mapping, Union
 from prometheus_client import Gauge, Counter, Histogram
 from services.redis_client import r
+from validation.validators import validate_device_data, validate_new_device_data
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("smart_home.monitoring.metrics")
 
 PROMETHEUS_URL = "http://prometheus-svc.smart-home.svc.cluster.local:9090"
 # Prometheus metrics
@@ -103,7 +106,17 @@ def record_on_interval_end(device_id: str) -> float | None:
     return (end_time - start_time).total_seconds()
 
 
-def update_binary_device_status(device: Mapping[str, Any], new_status: str) -> None:
+def update_device_status(device: Mapping[str, Any], new_status: str) -> None:
+    """
+    Records an update of a device's status with a new status.
+
+    If the new status is the same as the current status, effectively nothing happens.
+
+    :param Mapping[str, Any] device: The device whose status is being updated.
+    :param str new_status: The new status of the device.
+    :return: None
+    :rtype: None
+    """
     # For binary states, determine the two options
     known_states = {
         "on": "off",
@@ -119,12 +132,12 @@ def update_binary_device_status(device: Mapping[str, Any], new_status: str) -> N
         return
 
     if new_status == "on" and (not r.sismember("seen_devices", device["id"]) or device["status"] == "off"):
-        # Starting interval
+        # Starting new interval
         record_on_interval_start(device["id"])
         if r.sismember("seen_devices", device["id"]):
             device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
 
-    # Ending interval
+    # Ending latest interval
     if new_status == "off" and device["status"] == "on":
         duration = record_on_interval_end(device["id"])
         if duration:
@@ -134,45 +147,79 @@ def update_binary_device_status(device: Mapping[str, Any], new_status: str) -> N
         1 if new_status in {"on", "locked", "closed"} else 0)
 
 
-def flip_device_boolean_flag(metric: Gauge, device_id: str, flag: str, new_value: bool) -> bool:
-    if isinstance(new_value, bool):
-        metric.labels(device_id=device_id, state=str(new_value)).set(1)
-        metric.labels(device_id=device_id, state=str(not new_value)).set(0)
-        return True
-    logger.error(f"Unsupported value '{new_value}' for parameter '{flag}'")
-    raise ValueError(f"Unsupported value '{new_value}' for parameter '{flag}'")
+def flip_device_boolean_flag(metric: Gauge, device_id: str, flag: str, new_value: bool) -> None:
+    """
+    Records flipping a boolean flag on the device.
+
+    :param Gauge metric: The metric recording the boolean flag.
+    :param str device_id: ID of the device.
+    :param str flag: The name of the boolean flag.
+    :param bool new_value: The new value of the boolean flag.
+    :return: None
+    :rtype: None
+    """
+    metric.labels(device_id=device_id, state=str(new_value)).set(1)
+    metric.labels(device_id=device_id, state=str(not new_value)).set(0)
 
 
-def get_device_on_interval_at_time(device_id: str, check_time: datetime) -> (
-        Union[tuple[datetime, datetime | None], None]
-):
+def get_device_on_interval_at_time(device_id: str, check_time: datetime) -> tuple[datetime, datetime | None] | None:
+    """
+    Returns the interval of time during which the device was on that includes the
+    given time, if exists.
+
+    :param str device_id: ID of the device.
+    :param datetime check_time: The time to check against.
+    :return: Either a tuple of datetimes representing the interval, or None
+        if no interval was found.
+    :rtype: tuple[datetime, datetime | None] | None
+    """
+    # The key of the device in the Redis data structure
     key = f"device_on_intervals:{device_id}"
     intervals = r.lrange(key, 0, -1)  # Get all intervals for the device
     for interval_json in intervals:
         try:
             on_str, off_str = json.loads(interval_json)
             on_time = datetime.fromisoformat(on_str)
-            off_time = datetime.fromisoformat(off_str) if off_str else None
+            off_time = datetime.fromisoformat(off_str) if off_str is not None else None
             if off_time is None:
                 return on_time, None
             elif on_time <= check_time <= off_time:
                 return on_time, off_time
         except (ValueError, TypeError):
-            continue
+            continue  # Skip malformed intervals
     return None
 
 
-def mark_device_read(device: Mapping[str, Any]):
+def mark_device_read(device: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """
+    Marks a device as seen when read for the first time from the Mongo database.
+
+    If the device is indeed new and its data is valid, create new 0 value metrics for
+    its total on time and total on events.
+
+    :param Mapping[str, Any] device: The device to mark as seen.
+    :return: A tuple of a boolean value indicating success and an optional reason for failure,
+        or None on success. Returns True if the device was marked as seen, False if already marked
+        as seen or if it didn't pass data validation.
+    :rtype: tuple[bool, str | None]
+    """
     device_id = device.get("id")
-    if device_id and not r.sismember("seen_devices", device["id"]):
-        logger.info(f"Device {device_id} read from DB for the first time")
-        logger.info(f"Adding metrics for device {device_id}")
-        device_on_events.labels(device_id=device_id, device_type=device["type"]).inc(0)
-        device_usage_seconds.labels(device_id=device_id, device_type=device["type"]).inc(0)
-        update_device_metrics(device, device)
-        for key, value in device["parameters"].items():
-            device_metrics_action(device, key, value)
-        r.sadd("seen_devices", device_id)
+    if device_id is not None and not r.sismember("seen_devices", device_id):
+        logger.info(f"Device {device_id} read from DB for the first time. Validating device {device}:")
+        success, reason = validate_new_device_data(device)
+        if success:
+            logger.info(f"Success. Adding metrics for device {device_id}")
+            device_on_events.labels(device_id=device_id, device_type=device["type"]).inc(0)
+            device_usage_seconds.labels(device_id=device_id, device_type=device["type"]).inc(0)
+            update_device_metrics(device, device)
+            for key, value in device["parameters"].items():
+                device_metrics_action(device, key, value)
+            r.sadd("seen_devices", device_id)
+            return True, None
+        else:
+            return False, reason
+    else:
+        return False, f"Device {device_id} already read."
 
 
 def update_device_metrics(old_device: Mapping[str, Any], updated_device: Mapping[str, Any]) -> None:
@@ -194,7 +241,9 @@ def update_device_metrics(old_device: Mapping[str, Any], updated_device: Mapping
                     value=value,
                 ).set(1)
             case "status":
-                update_binary_device_status(old_device, value)
+                update_device_status(old_device, value)
+            case "parameters":
+                device_metrics_action(old_device, key, value)
 
 
 def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tuple[bool, str | None]:
@@ -211,21 +260,19 @@ def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tu
                         device_id=device["id"],
                     ).set(value)
                 case "is_heating":
-                    if not flip_device_boolean_flag(
-                            metric=water_heater_is_heating_status,
-                            new_value=value,
-                            device_id=device["id"],
-                            flag=key,
-                    ):
-                        return False, f"Unsupported value '{value}' for parameter '{key}'"
+                    flip_device_boolean_flag(
+                        metric=water_heater_is_heating_status,
+                        new_value=value,
+                        device_id=device["id"],
+                        flag=key,
+                    )
                 case "timer_enabled":
-                    if not flip_device_boolean_flag(
-                            metric=water_heater_timer_enabled_status,
-                            new_value=value,
-                            device_id=device["id"],
-                            flag=key,
-                    ):
-                        return False, f"Unsupported value '{value}' for parameter '{key}'"
+                    flip_device_boolean_flag(
+                        metric=water_heater_timer_enabled_status,
+                        new_value=value,
+                        device_id=device["id"],
+                        flag=key,
+                    )
                 case "scheduled_on":
                     water_heater_schedule_info.labels(
                         device_id=device["id"],
@@ -239,8 +286,9 @@ def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tu
                         scheduled_off=value,
                     )
                 case _:
-                    logger.error(f"Unknown parameter '{key}'")
-                    return False, f"Unknown parameter '{key}'"
+                    error = f"Unknown parameter '{key}'"
+                    logger.error(error)
+                    return False, error
         case "light":
             match key:
                 case "brightness":
@@ -249,19 +297,17 @@ def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tu
                         is_dimmable=str(device["parameters"]["is_dimmable"]),
                     ).set(value)
                 case "color":
-                    try:
-                        light_color.labels(
-                            device_id=device["id"],
-                            dynamic_color=str(device["parameters"]["dynamic_color"]),
-                        ).set(int("0x" + value[1:], 16))
-                    except (KeyError, ValueError):
-                        logger.exception(f"Incorrect color string '{value}'")
+                    light_color.labels(
+                        device_id=device["id"],
+                        dynamic_color=str(device["parameters"]["dynamic_color"]),
+                    ).set(int("0x" + value[1:], 16))
                 case "is_dimmable" | "dynamic_color":
                     # Read-only parameter, not tracking in metrics
                     pass
                 case _:
-                    logger.error(f"Unknown parameter '{key}'")
-                    return False, f"Unknown parameter '{key}'"
+                    error = f"Unknown parameter '{key}'"
+                    logger.error(error)
+                    return False, error
         case "air_conditioner":
             match key:
                 case "temperature":
@@ -290,8 +336,9 @@ def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tu
                             mode=value,
                         ).set(1 if mode == value else 0)
                 case _:
-                    logger.error(f"Unknown parameter '{key}'")
-                    return False, f"Unknown parameter '{key}'"
+                    error = f"Unknown parameter '{key}'"
+                    logger.error(error)
+                    return False, error
         case "door_lock":
             match key:
                 case "auto_lock_enabled":
@@ -302,23 +349,37 @@ def device_metrics_action(device: Mapping[str, Any], key: str, value: Any) -> tu
                         device_id=device["id"],
                     ).set(value)
                 case _:
-                    logger.error(f"Unknown parameter '{key}'")
-                    return False, f"Unknown parameter '{key}'"
+                    error = f"Unknown parameter '{key}'"
+                    logger.error(error)
+                    return False, error
         case "curtain":
             match key:
                 case "position":
                     # Read-only parameter, not tracked in metrics
                     pass
                 case _:
-                    logger.error(f"Unknown parameter '{key}'")
-                    return False, f"Unknown parameter '{key}'"
+                    error = f"Unknown parameter '{key}'"
+                    logger.error(error)
+                    return False, error
         case _:
-            logger.error(f"Unknown device type '{device['type']}'")
-            return False, f"Unknown device type '{device['type']}'"
+            error = f"Unknown device type '{device['type']}'"
+            logger.error(error)
+            return False, error
     return True, None
 
 
-def query_prometheus(query) -> Union[list[dict[str, Any]], dict[str, str]]:
+def query_prometheus(query: str) -> list[dict[str, Any]] | dict[str, str]:
+    """
+    Queries the Prometheus database.
+
+    Returns a list of matching metric results, or if an error occurred,
+    returns a dictionary with the one key "error" whose value is a string
+    detailing the error.
+
+    :param str query: The query string.
+    :return: A list of matching results, or a dictionary explaining the error if one occurs.
+    :rtype: list[dict[str, Any]] | dict[str, str]
+    """
     try:
         logger.debug(f"Querying Prometheus: {query}")
         resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": query}, timeout=5)
@@ -331,8 +392,18 @@ def query_prometheus(query) -> Union[list[dict[str, Any]], dict[str, str]]:
         return {"error": str(e)}
 
 
-def query_prometheus_range(metric: str, start: datetime, end: datetime, step: str = "60s") -> (
-        Union[list[dict[str, Any]], dict[str, str]]):
+def query_prometheus_range(metric: str, start: datetime, end: datetime, step: str = "60s") -> list[dict[str, Any]] | \
+                                                                                              dict[str, str]:
+    """
+    Queries the Prometheus database during a given time window.
+
+    :param str metric: The metric to query.
+    :param datetime start: When to start the query.
+    :param datetime end: When to stop the query.
+    :param str step: The time step to use when querying.
+    :return: A list of matching results, or a dictionary explaining the error if one occurs.
+    :rtype: list[dict[str, Any]] | dict[str, str]
+    """
     query = metric
     try:
         params = {
@@ -351,8 +422,17 @@ def query_prometheus_range(metric: str, start: datetime, end: datetime, step: st
         return {"error": str(e)}
 
 
-def query_prometheus_point_increase(metric: str, start: datetime, end: datetime) -> (
-        Union[list[dict[str, Any]], dict[str, str]]):
+def query_prometheus_point_increase(metric: str, start: datetime, end: datetime) -> list[dict[str, Any]] | \
+                                                                                    dict[str, str]:
+    """
+    Queries the Prometheus database for the increase of a given metric during a given time window.
+
+    :param str metric: The metric to query.
+    :param datetime start: When to start the query.
+    :param datetime end: When to stop the query.
+    :return: A list of matching results, or a dictionary explaining the error if one occurs.
+    :rtype: list[dict[str, Any]] | dict[str, str]
+    """
     window_seconds = int((end - start).total_seconds())
     range_expr = f"{window_seconds}s"
     query = f"increase({metric}[{range_expr}])"
@@ -369,3 +449,85 @@ def query_prometheus_point_increase(metric: str, start: datetime, end: datetime)
     except requests.RequestException as e:
         logger.exception(f"Error querying Prometheus point increase for metric '{metric}'")
         return {"error": str(e)}
+
+
+def generate_analytics() -> tuple[Response, int]:
+    """
+    Generates a json object of aggregate and individual device metrics.
+
+    :return: A flask Response object and an HTTP status code.
+    :rtype: tuple[Response, int]
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        logger.debug(f"Received analytics request body: {body}")
+
+        to_ts = datetime.fromisoformat(body.get("to")) if "to" in body else datetime.now(UTC)
+        from_ts = datetime.fromisoformat(body.get("from")) if "from" in body else to_ts - timedelta(days=7)
+
+        # Safety check
+        if from_ts >= to_ts:
+            return jsonify({"error": "'from' must be before 'to'"}), 400
+
+        usage_results = query_prometheus_point_increase("device_usage_seconds_total", from_ts, to_ts)
+        event_results = query_prometheus_point_increase("device_on_events_total", from_ts, to_ts)
+
+        if isinstance(usage_results, dict) and "error" in usage_results:
+            logger.error(f"Prometheus usage query failed: {usage_results['error']}")
+            return jsonify({"error": f"Failed to query Prometheus, details: {usage_results["error"]}"}), 500
+        if isinstance(event_results, dict) and "error" in usage_results:
+            logger.error(f"Prometheus usage query failed: {event_results['error']}")
+            return jsonify({"error": f"Failed to query Prometheus, details: {event_results["error"]}"}), 500
+
+        device_analytics_json = {}
+
+        for item in usage_results:
+            if "value" not in item:
+                logger.warning(f"Missing 'value' in usage result: {item}")
+                continue
+            device_id = item["metric"].get("device_id", "unknown")
+            usage_seconds = float(item["value"][1])
+            logger.debug(f"Device {device_id} usage seconds: {usage_seconds}")
+            device_analytics_json.setdefault(device_id, {})["total_usage_minutes"] = usage_seconds / 60
+            # Include currently on devices that haven't been added to the metric yet
+            interval = get_device_on_interval_at_time(device_id, to_ts)
+            if interval:
+                on_time, off_time = interval
+                effective_start = max(on_time, from_ts)
+                effective_end = min(off_time or to_ts, to_ts)
+                extra_seconds = (effective_end - effective_start).total_seconds()
+                if device_id in device_analytics_json:
+                    device_analytics_json[device_id]["total_usage_minutes"] += extra_seconds / 60
+                else:
+                    device_analytics_json[device_id] = {"total_usage_minutes": extra_seconds / 60}
+        for item in event_results:
+            if "value" not in item:
+                logger.warning(f"Missing 'value' in event result: {item}")
+                continue
+            device_id = item["metric"].get("device_id", "unknown")
+            on_count = int(float(item["value"][1]))
+            logger.debug(f"Device {device_id} on count: {on_count}")
+            device_analytics_json.setdefault(device_id, {})["on_events"] = on_count
+
+        total_usage = sum(d.get("total_usage_minutes", 0) for d in device_analytics_json.values())
+        total_on_events = sum(d.get("on_events", 0) for d in device_analytics_json.values())
+
+        response = {
+            "analytics_window": {
+                "from": from_ts.isoformat(),
+                "to": to_ts.isoformat()
+            },
+            "aggregate": {
+                "total_devices": r.scard("seen_devices"),
+                "total_on_events": total_on_events,
+                "total_usage_minutes": total_usage
+            },
+            "on_devices": device_analytics_json,
+            "message": "For full analytics, charts, and trends, visit the Grafana dashboard."
+        }
+
+        logger.debug(f"Returning analytics response: {response}")
+        return jsonify(response), 200
+    except Exception as e:
+        logger.exception("Unexpected error in /api/devices/analytics")
+        return jsonify({"error": str(e)}), 500

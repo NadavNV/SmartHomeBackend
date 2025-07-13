@@ -1,12 +1,11 @@
+import config.env  # noqa: F401  # load_dotenv side effect
 import re
 import logging
 import os
 import json
-from typing import Any
-from dotenv import load_dotenv
+from typing import Any, Mapping
 
-load_dotenv("config/constants.env")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("smart_home.validation.validators")
 
 # Minimum temperature (Celsius) for water heater
 MIN_WATER_TEMP = int(os.getenv('VITE_MIN_WATER_TEMP', 49))
@@ -29,8 +28,13 @@ MIN_BATTERY = int(os.getenv("VITE_MIN_BATTERY", 0))
 # Maximum value for battery level
 MAX_BATTERY = int(os.getenv("VITE_MAX_BATTERY", 100))
 
-DEVICE_TYPES = set(json.loads(os.getenv("VITE_DEVICE_TYPES"))) or {"light", "water_heater", "air_conditioner",
-                                                                   "door_lock", "curtain"}
+DEVICE_TYPES = set(json.loads(os.getenv("VITE_DEVICE_TYPES"))) or {
+    "light",
+    "water_heater",
+    "air_conditioner",
+    "door_lock",
+    "curtain",
+}
 WATER_HEATER_PARAMETERS = set(json.loads(os.getenv("VITE_WATER_HEATER_PARAMETERS"))) or {
     "temperature",
     "target_temperature",
@@ -75,45 +79,62 @@ COLOR_REGEX = os.getenv("VITE_COLOR_REGEX", '^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$'
 
 # Verify that the given string is a correct ISO format time string
 def verify_time_string(string: str) -> bool:
+    """
+    Verify that the given string is a correct ISO format time string.
+
+    :param str string: The string to verify.
+    :return: True if the string is a correct ISO format time string, False otherwise.
+    :rtype: bool
+    """
     return bool(re.match(TIME_REGEX, string))
 
 
 def verify_type_and_range(value: Any, name: str, cls: type,
                           value_range: tuple[int, int] | set[str] | str | None = None) -> tuple[bool, str | None]:
     """
-    This function verifies that 'value' is of type 'cls', and when relevant that it is
-    within an allowed range of values.
+    This function verifies that 'value' is of type 'cls', and when relevant that it is within
+    an allowed range of values.
+
     If 'cls' is int, then value_range maybe a tuple of (min_value, max_value). If 'cls' is
     str, then 'value_range' may be a set of allowed values. If 'cls' is str and 'value_range'
     is the string 'time' then 'value' must be a valid ISO format time string without seconds.
     if 'cls' is str and 'value_range' is the string 'color' then 'value' must be a valid
     HTML RGB string.
-    :param value: The value to be checked.
-    :param name: The name associated with the value, for error messages.
-    :param cls: The type to check against.
-    :param value_range: The value of 'value' is expected to fall within this range, if given.
-    :return: True if 'value' is of type 'cls' and matches the given 'value_range', False otherwise.
+    :param Any value: The value to be checked.
+    :param str name: The name associated with the value, for error messages.
+    :param type cls: The type to check against.
+    :param tuple[int, int] | set[str] | str | None value_range: The value of 'value' is expected
+        to fall within this range, if given.
+    :return: A tuple of a boolean value indicating success and an optional reason for failure,
+        or None on success. The boolean value is True if 'value' is of type 'cls' and matches the
+        given 'value_range', False otherwise.
+    :rtype: tuple[bool, str | None]
     """
     if cls == int:
         try:
             value = int(value)
-            if value_range is not None:
-                minimum, maximum = value_range
-                if value > maximum or value < minimum:
-                    logger.error(f"{name} must be between {minimum} and {maximum}, got {value} instead.")
-                    return False, f"{name} must be between {minimum} and {maximum}, got {value} instead."
-            return True, None
         except ValueError:
-            logger.error(f"{name} must be a numeric string, got {value} instead.")
-            return False, f"{name} must be a numeric string, got {value} instead."
+            error = f"{name} must be a numeric string, got {value} instead."
+            logger.error(error)
+            return False, error
+        if value_range is not None:
+            minimum, maximum = value_range
+            if value > maximum or value < minimum:
+                error = f"{name} must be between {minimum} and {maximum}, got {value} instead."
+                logger.error(error)
+                return False, error
+        return True, None
+
     if type(value) is not cls:
-        logger.error(f"{name} must be a {cls}, got {type(value)} instead.")
-        return False, f"{name} must be a {cls}, got {type(value)} instead."
+        error = f"{name} must be a {cls}, got {type(value)} instead."
+        logger.error(error)
+        return False, error
     if cls == str:
         if type(value_range) is set:
             if value not in value_range:
-                logger.error(f"{name} must be one of {value_range}, got {value} instead.")
-                return False, f"{name} must be one of {value_range}, got {value} instead."
+                error = f"'{value}' is not a valid value for '{name}'. Must be one of {value_range}."
+                logger.error(error)
+                return False, error
         elif value_range == 'time':
             return (bool(re.match(TIME_REGEX, value)),
                     None if re.match(TIME_REGEX, value) else f"'{value}' is not a valid ISO format time string.")
@@ -123,24 +144,26 @@ def verify_type_and_range(value: Any, name: str, cls: type,
     return True, None
 
 
-# Validates that the request to add a new device contains only valid information
-def validate_device_data(new_device) -> tuple[bool, str | None]:
-    required_fields = {'id', 'type', 'room', 'name', 'status', 'parameters'}
-    if set(new_device.keys()) != required_fields:
-        logger.error(f"Incorrect field(s) in new device {set(new_device.keys()) - required_fields}, "
-                     f"must be exactly these fields: {required_fields}")
-        return False, (f"Incorrect field(s) in new device {set(new_device.keys()) - required_fields}, must be exactly "
-                       f"these fields: {required_fields}")
-    for field in list(new_device.keys()):
-        if field == 'type' and new_device['type'] not in DEVICE_TYPES:
-            logger.error(f"Incorrect device type {new_device['type']}, must be one of {DEVICE_TYPES}.")
-            return False, f"Incorrect device type {new_device['type']}, must be one of {DEVICE_TYPES}."
+def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """
+    Verifies that new device data, either for an update or for a new device, is valid.
+
+    :param device: The device to verify
+    :return: A tuple of a boolean value indicating success and an optional reason for failure,
+        or None on success.
+    :rtype: tuple[bool, str | None]
+    """
+    for field in list(device.keys()):
+        if field == 'type' and device['type'] not in DEVICE_TYPES:
+            error = f"Incorrect device type {device['type']}, must be one of {DEVICE_TYPES}."
+            logger.error(error)
+            return False, error
         if field == 'status':
-            if 'type' in new_device and new_device['type'] in DEVICE_TYPES:
-                match new_device['type']:
+            if 'type' in device and device['type'] in DEVICE_TYPES:
+                match device['type']:
                     case "door_lock":
                         success, reason = verify_type_and_range(
-                            value=new_device['status'],
+                            value=device['status'],
                             name="'status'",
                             cls=str,
                             value_range={'unlocked', 'locked'},
@@ -149,7 +172,7 @@ def validate_device_data(new_device) -> tuple[bool, str | None]:
                             return False, reason
                     case "curtain":
                         success, reason = verify_type_and_range(
-                            value=new_device['status'],
+                            value=device['status'],
                             name="'status'",
                             cls=str,
                             value_range={'open', 'closed'},
@@ -158,7 +181,7 @@ def validate_device_data(new_device) -> tuple[bool, str | None]:
                             return False, reason
                     case _:
                         success, reason = verify_type_and_range(
-                            value=new_device['status'],
+                            value=device['status'],
                             name="'status'",
                             cls=str,
                             value_range={'on', 'off'},
@@ -166,24 +189,24 @@ def validate_device_data(new_device) -> tuple[bool, str | None]:
                         if not success:
                             return False, reason
         if field == 'parameters':
-            if 'type' in new_device and new_device['type'] in DEVICE_TYPES:
+            if 'type' in device and device['type'] in DEVICE_TYPES:
                 success, reason = verify_type_and_range(
-                    value=new_device['parameters'],
+                    value=device['parameters'],
                     name="'parameters'",
                     cls=dict,
                 )
                 if not success:
                     return False, reason
-                left_over_parameters = set(new_device['parameters'].keys())
-                match new_device['type']:
+                left_over_parameters = set(device['parameters'].keys())
+                match device['type']:
                     case "door_lock":
                         left_over_parameters -= LOCK_PARAMETERS
                         if left_over_parameters != set():
-                            logger.error(f"Disallowed parameters for door lock {left_over_parameters}, "
-                                         f"allowed parameters: {LOCK_PARAMETERS}")
-                            return False, (f"Disallowed parameters for door lock {left_over_parameters}, "
-                                           f"allowed parameters: {LOCK_PARAMETERS}")
-                        for key, value in new_device['parameters'].items():
+                            error = (f"Disallowed parameters for door lock {left_over_parameters}, "
+                                     f"allowed parameters: {LOCK_PARAMETERS}")
+                            logger.error(error)
+                            return False, error
+                        for key, value in device['parameters'].items():
                             if key == 'auto_lock_enabled':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -204,11 +227,11 @@ def validate_device_data(new_device) -> tuple[bool, str | None]:
                     case "curtain":
                         left_over_parameters -= CURTAIN_PARAMETERS
                         if left_over_parameters != set():
-                            logger.error(f"Disallowed parameters for curtain {left_over_parameters}, "
-                                         f"allowed parameters: {CURTAIN_PARAMETERS}")
-                            return False, (f"Disallowed parameters for curtain {left_over_parameters}, "
-                                           f"allowed parameters: {CURTAIN_PARAMETERS}")
-                        for key, value in new_device['parameters'].items():
+                            error = (f"Disallowed parameters for curtain {left_over_parameters}, "
+                                     f"allowed parameters: {CURTAIN_PARAMETERS}")
+                            logger.error(error)
+                            return False, error
+                        for key, value in device['parameters'].items():
                             if key == 'position':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -221,11 +244,11 @@ def validate_device_data(new_device) -> tuple[bool, str | None]:
                     case "air-conditioner":
                         left_over_parameters -= AC_PARAMETERS
                         if left_over_parameters != set():
-                            logger.error(f"Disallowed parameters for air conditioner {left_over_parameters}, "
-                                         f"allowed parameters: {AC_PARAMETERS}")
-                            return False, (f"Disallowed parameters for air conditioner {left_over_parameters}, "
-                                           f"allowed parameters: {AC_PARAMETERS}")
-                        for key, value in new_device['parameters'].items():
+                            error = (f"Disallowed parameters for air conditioner {left_over_parameters}, "
+                                     f"allowed parameters: {AC_PARAMETERS}")
+                            logger.error(error)
+                            return False, error
+                        for key, value in device['parameters'].items():
                             if key == 'temperature':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -265,11 +288,11 @@ def validate_device_data(new_device) -> tuple[bool, str | None]:
                     case "water-heater":
                         left_over_parameters -= WATER_HEATER_PARAMETERS
                         if left_over_parameters != set():
-                            logger.error(f"Disallowed parameters for water heater {left_over_parameters}, "
-                                         f"allowed parameters: {WATER_HEATER_PARAMETERS}")
-                            return False, (f"Disallowed parameters for water heater {left_over_parameters}, "
-                                           f"allowed parameters: {WATER_HEATER_PARAMETERS}")
-                        for key, value in new_device['parameters'].items():
+                            error = (f"Disallowed parameters for water heater {left_over_parameters}, "
+                                     f"allowed parameters: {WATER_HEATER_PARAMETERS}")
+                            logger.error(error)
+                            return False, error
+                        for key, value in device['parameters'].items():
                             if key == 'temperature':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -325,11 +348,11 @@ def validate_device_data(new_device) -> tuple[bool, str | None]:
                     case "light":
                         left_over_parameters -= LIGHT_PARAMETERS
                         if left_over_parameters != set():
-                            logger.error(f"Disallowed parameters for door lock {left_over_parameters},"
-                                         f"allowed parameters: {LIGHT_PARAMETERS}")
-                            return False, (f"Disallowed parameters for door lock {left_over_parameters},"
-                                           f"allowed parameters: {LIGHT_PARAMETERS}")
-                        for key, value in new_device['parameters'].items():
+                            error = (f"Disallowed parameters for door lock {left_over_parameters},"
+                                     f"allowed parameters: {LIGHT_PARAMETERS}")
+                            logger.error(error)
+                            return False, error
+                        for key, value in device['parameters'].items():
                             if key == 'brightness':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -367,29 +390,19 @@ def validate_device_data(new_device) -> tuple[bool, str | None]:
     return True, None
 
 
-# Verify that only parameters that are relevant to the device type are being
-# modified. For example, a light shouldn't have a target temperature and a
-# water heater shouldn't have a brightness.
-def validate_action_parameters(device_type: str, updated_parameters: dict) -> bool:
-    match device_type:
-        case "water_heater":
-            allowed_parameters = WATER_HEATER_PARAMETERS
-        case 'light':
-            allowed_parameters = LIGHT_PARAMETERS
-        case 'air_conditioner':
-            allowed_parameters = AC_PARAMETERS
-        case 'door_lock':
-            allowed_parameters = [
-                "auto_lock_enabled",
-                "battery_level",
-            ]
-        case 'curtain':
-            allowed_parameters = CURTAIN_PARAMETERS
-        case _:
-            logger.error(f"Unknown device type {device_type}")
-            return False
-    for field in updated_parameters:
-        if field not in allowed_parameters:
-            logger.error(f"Incorrect field in update endpoint: {field}")
-            return False
-    return True
+def validate_new_device_data(new_device: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """
+    Validates that the request to add a new device contains only valid information.
+
+    :param Mapping[str, Any] new_device: The new device to verify.
+    :return: A tuple of a boolean value indicating success and an optional reason for failure,
+        or None on success.
+    :rtype: tuple[bool, str | None]
+    """
+    required_fields = {'id', 'type', 'room', 'name', 'status', 'parameters'}
+    if set(new_device.keys()) != required_fields:
+        error = (f"Incorrect field(s) in new device {set(new_device.keys()) - required_fields}, "
+                 f"must be exactly these fields: {required_fields}")
+        logger.error(error)
+        return False, error
+    return validate_device_data(new_device)
