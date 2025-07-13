@@ -40,9 +40,6 @@ logging.basicConfig(
 # Env variables
 load_dotenv()
 
-username = os.getenv("MONGO_USER")
-password = os.getenv("MONGO_PASS")
-
 REDIS_PASS = os.getenv("REDIS_PASS")
 
 # How many times to attempt a connection request
@@ -54,6 +51,8 @@ BROKER_HOST = os.getenv("BROKER_HOST", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 
 MONGO_DB_CONNECTION_STRING = os.getenv("MONGO_DB_CONNECTION_STRING")
+MONGO_USER = os.getenv("MONGO_USER")
+MONGO_PASS = os.getenv("MONGO_PASS")
 
 REQUEST_COUNT = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
 REQUEST_LATENCY = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
@@ -582,8 +581,8 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 # Database parameters
 uri = MONGO_DB_CONNECTION_STRING if MONGO_DB_CONNECTION_STRING is not None else (
-        f"mongodb+srv://{username}:{password}" +
-        "@smart-home-db.w9dsqtr.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-db"
+    f"mongodb+srv://{MONGO_USER}:{MONGO_PASS}"
+    f"@smart-home-devices.u2axxrl.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-devices"
 )
 try:
     mongo_client = MongoClient(uri, server_api=ServerApi('1'))
@@ -602,7 +601,7 @@ for attempt in range(RETRIES):
         app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
         time.sleep(delay)
 
-db = mongo_client["smart_home"]
+db = mongo_client["smart-home-devices"]
 devices_collection = db["devices"]
 
 r = redis.Redis(
