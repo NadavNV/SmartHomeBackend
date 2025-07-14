@@ -28,44 +28,22 @@ MIN_BATTERY = int(os.getenv("MIN_BATTERY", 0))
 # Maximum value for battery level
 MAX_BATTERY = int(os.getenv("MAX_BATTERY", 100))
 
-DEVICE_TYPES = set(json.loads(os.getenv("DEVICE_TYPES"))) or {
-    "light",
-    "water_heater",
-    "air_conditioner",
-    "door_lock",
-    "curtain",
-}
-WATER_HEATER_PARAMETERS = set(json.loads(os.getenv("WATER_HEATER_PARAMETERS"))) or {
-    "temperature",
-    "target_temperature",
-    "is_heating",
-    "timer_enabled",
-    "scheduled_on",
-    "scheduled_off",
-}
-LIGHT_PARAMETERS = set(json.loads(os.getenv("LIGHT_PARAMETERS"))) or {
-    "brightness",
-    "color",
-    "is_dimmable",
-    "dynamic_color",
-}
-AC_PARAMETERS = set(json.loads(os.getenv("AC_PARAMETERS"))) or {
-    "temperature",
-    "mode",
-    "fan_speed",
-    "swing",
-}
-AC_MODES = set(json.loads(os.getenv("AC_MODES"))) or {'cool', 'heat', 'fan'}
-AC_FAN_SETTINGS = set(json.loads(os.getenv("AC_FAN_SETTINGS"))) or {'off', 'low', 'medium', 'high'}
-AC_SWING_MODES = set(json.loads(os.getenv("AC_SWING_MODES"))) or {'off', 'on', 'auto'}
-LOCK_PARAMETERS = set(json.loads(os.getenv("LOCK_PARAMETERS"))) or {
-    "auto_lock_enabled",
-    "battery_level",
-}
-CURTAIN_PARAMETERS = set(json.loads(os.getenv("CURTAIN_PARAMETERS"))) or {
-    "position",
-}
-
+DEVICE_TYPES = set(json.loads(os.getenv("DEVICE_TYPES", '["light","water_heater","air_conditioner","door_lock",'
+                                                        '"curtain"]')))
+DEVICE_PARAMETERS = set(
+    json.loads(os.getenv("DEVICE_PARAMETERS", '["id","type","room","name","status","parameters"]')))
+WATER_HEATER_PARAMETERS = set(json.loads(os.getenv("WATER_HEATER_PARAMETERS", '["temperature","target_temperature",'
+                                                                              '"is_heating","timer_enabled",'
+                                                                              '"scheduled_on","scheduled_off"]')))
+LIGHT_PARAMETERS = set(
+    json.loads(os.getenv("LIGHT_PARAMETERS", '["brightness","color","is_dimmable","dynamic_color"]'))
+)
+AC_PARAMETERS = set(json.loads(os.getenv("AC_PARAMETERS", '["temperature","mode","fan_speed","swing"]')))
+AC_MODES = set(json.loads(os.getenv("AC_MODES", '["cool","heat","fan"]')))
+AC_FAN_SETTINGS = set(json.loads(os.getenv("AC_FAN_SETTINGS", '["off","low","medium","high"]')))
+AC_SWING_MODES = set(json.loads(os.getenv("AC_SWING_MODES", '["off","on","auto"]')))
+LOCK_PARAMETERS = set(json.loads(os.getenv("LOCK_PARAMETERS", '["auto_lock_enabled","battery_level"]')))
+CURTAIN_PARAMETERS = set(json.loads(os.getenv("CURTAIN_PARAMETERS", '["position"]')))
 # Regex explanation:
 #
 # ([01][0-9]|2[0-3]) - Hours. Either a 2 followed by 0-3 or an initial digit
@@ -241,7 +219,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                 )
                                 if not success:
                                     return False, reason
-                    case "air-conditioner":
+                    case "air_conditioner":
                         left_over_parameters -= AC_PARAMETERS
                         if left_over_parameters != set():
                             error = (f"Disallowed parameters for air conditioner {left_over_parameters}, "
@@ -285,7 +263,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                 )
                                 if not success:
                                     return False, reason
-                    case "water-heater":
+                    case "water_heater":
                         left_over_parameters -= WATER_HEATER_PARAMETERS
                         if left_over_parameters != set():
                             error = (f"Disallowed parameters for water heater {left_over_parameters}, "
@@ -298,7 +276,6 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value=value,
                                     name="'temperature'",
                                     cls=int,
-                                    value_range=(MIN_WATER_TEMP, MAX_WATER_TEMP),
                                 )
                                 if not success:
                                     return False, reason
@@ -371,7 +348,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                 )
                                 if not success:
                                     return False, reason
-                            elif key == 'brightness':
+                            elif key == 'is_dimmable':
                                 success, reason = verify_type_and_range(
                                     value=value,
                                     name="'is_dimmable'",
@@ -399,10 +376,9 @@ def validate_new_device_data(new_device: Mapping[str, Any]) -> tuple[bool, str |
         or None on success.
     :rtype: tuple[bool, str | None]
     """
-    required_fields = {'id', 'type', 'room', 'name', 'status', 'parameters'}
-    if set(new_device.keys()) != required_fields:
-        error = (f"Incorrect field(s) in new device {set(new_device.keys()) - required_fields}, "
-                 f"must be exactly these fields: {required_fields}")
+    if set(new_device.keys()) != DEVICE_PARAMETERS:
+        error = (f"Incorrect field(s) in new device {set(new_device.keys()) ^ DEVICE_PARAMETERS}, "
+                 f"must be exactly these fields: {DEVICE_PARAMETERS}")
         logger.error(error)
         return False, error
     return validate_device_data(new_device)
