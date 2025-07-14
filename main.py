@@ -179,6 +179,7 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
             return
         match method:
             case "update":
+                # TODO: Make sure id and type can't be changed
                 # Update an existing device
                 if "id" in payload and payload["id"] != device_id:
                     app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
@@ -416,6 +417,7 @@ def update_device_endpoint(device_id: str) -> tuple[Response, int]:
     """
     # TODO: Validate all parameters before updating metrics
     updated_device = request.json
+    # TODO: Make sure id and type can't be changed
     # Remove ID from the received device, to ensure it doesn't overwrite an existing ID
     id_to_update = updated_device.pop("id", None)
     if id_to_update is not None and id_to_update != device_id:
