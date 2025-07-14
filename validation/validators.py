@@ -20,22 +20,22 @@ MIN_BRIGHTNESS = int(os.getenv('VITE_MIN_BRIGHTNESS', 0))
 # Maximum brightness for dimmable light
 MAX_BRIGHTNESS = int(os.getenv("VITE_MAX_BRIGHTNESS", 100))
 # Minimum position for curtain
-MIN_POSITION = int(os.getenv("VITE_MIN_POSITION", 0))
+MIN_POSITION = int(os.getenv("MIN_POSITION", 0))
 # Maximum position for curtain
-MAX_POSITION = int(os.getenv("VITE_MAX_POSITION", 100))
+MAX_POSITION = int(os.getenv("MAX_POSITION", 100))
 # Minimum value for battery level
-MIN_BATTERY = int(os.getenv("VITE_MIN_BATTERY", 0))
+MIN_BATTERY = int(os.getenv("MIN_BATTERY", 0))
 # Maximum value for battery level
-MAX_BATTERY = int(os.getenv("VITE_MAX_BATTERY", 100))
+MAX_BATTERY = int(os.getenv("MAX_BATTERY", 100))
 
-DEVICE_TYPES = set(json.loads(os.getenv("VITE_DEVICE_TYPES"))) or {
+DEVICE_TYPES = set(json.loads(os.getenv("DEVICE_TYPES"))) or {
     "light",
     "water_heater",
     "air_conditioner",
     "door_lock",
     "curtain",
 }
-WATER_HEATER_PARAMETERS = set(json.loads(os.getenv("VITE_WATER_HEATER_PARAMETERS"))) or {
+WATER_HEATER_PARAMETERS = set(json.loads(os.getenv("WATER_HEATER_PARAMETERS"))) or {
     "temperature",
     "target_temperature",
     "is_heating",
@@ -43,26 +43,26 @@ WATER_HEATER_PARAMETERS = set(json.loads(os.getenv("VITE_WATER_HEATER_PARAMETERS
     "scheduled_on",
     "scheduled_off",
 }
-LIGHT_PARAMETERS = set(json.loads(os.getenv("VITE_LIGHT_PARAMETERS"))) or {
+LIGHT_PARAMETERS = set(json.loads(os.getenv("LIGHT_PARAMETERS"))) or {
     "brightness",
     "color",
     "is_dimmable",
     "dynamic_color",
 }
-AC_PARAMETERS = set(json.loads(os.getenv("VITE_AC_PARAMETERS"))) or {
+AC_PARAMETERS = set(json.loads(os.getenv("AC_PARAMETERS"))) or {
     "temperature",
     "mode",
     "fan_speed",
     "swing",
 }
-AC_MODES = set(json.loads(os.getenv("VITE_AC_MODES"))) or {'cool', 'heat', 'fan'}
-AC_FAN_SETTINGS = set(json.loads(os.getenv("VITE_AC_FAN_SETTINGS"))) or {'off', 'low', 'medium', 'high'}
-AC_SWING_MODES = set(json.loads(os.getenv("VITE_AC_SWING_MODES"))) or {'off', 'on', 'auto'}
-LOCK_PARAMETERS = set(json.loads(os.getenv("VITE_LOCK_PARAMETERS"))) or {
+AC_MODES = set(json.loads(os.getenv("AC_MODES"))) or {'cool', 'heat', 'fan'}
+AC_FAN_SETTINGS = set(json.loads(os.getenv("AC_FAN_SETTINGS"))) or {'off', 'low', 'medium', 'high'}
+AC_SWING_MODES = set(json.loads(os.getenv("AC_SWING_MODES"))) or {'off', 'on', 'auto'}
+LOCK_PARAMETERS = set(json.loads(os.getenv("LOCK_PARAMETERS"))) or {
     "auto_lock_enabled",
     "battery_level",
 }
-CURTAIN_PARAMETERS = set(json.loads(os.getenv("VITE_CURTAIN_PARAMETERS"))) or {
+CURTAIN_PARAMETERS = set(json.loads(os.getenv("CURTAIN_PARAMETERS"))) or {
     "position",
 }
 
