@@ -21,7 +21,7 @@ from prometheus_client import generate_latest
 from services.redis_client import r
 
 # Validation
-from validation.validators import validate_device_data, validate_new_device_data
+from validation.validators import validate_device_data
 
 # Monitoring
 from monitoring.metrics import (
@@ -184,7 +184,7 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
                 if "id" in payload and payload["id"] != device_id:
                     app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
                     return
-                success, reason = validate_device_data(device)
+                success, reasons = validate_device_data(payload, device_type=device["type"])
                 if success:
                     update_device(device, payload)
                     return
@@ -193,10 +193,10 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
                 if "id" in payload and payload["id"] != device_id:
                     app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
                     return
-                success, reason = validate_new_device_data(payload)
+                success, reason = validate_device_data(payload, new_device=True)
                 if success:
-                    if id_exists(payload["id"]):
-                        app.logger.error("ID already exists")
+                    if id_exists(device_id):
+                        app.logger.error(f"ID {device_id} already exists")
                         return
                     devices_collection.insert_one(payload)
                     app.logger.info("Device added successfully")
@@ -339,7 +339,7 @@ def add_device() -> tuple[Response, int]:
     :rtype: tuple[Response, int]
     """
     new_device = request.json
-    success, reason = validate_new_device_data(new_device)
+    success, reasons = validate_device_data(new_device, new_device=True)
     if success:
         if id_exists(new_device["id"]):
             return jsonify({'error': f"ID {new_device["id"]} already exists"}), 400
@@ -353,7 +353,7 @@ def add_device() -> tuple[Response, int]:
             )
             return jsonify({'output': "Device added successfully"}), 200
     else:
-        return jsonify({'error': f'{reason}'}), 400
+        return jsonify({'error': reasons}), 400
 
 
 @app.delete("/api/devices/<device_id>")
@@ -415,9 +415,7 @@ def update_device_endpoint(device_id: str) -> tuple[Response, int]:
     :return: Response.
     :rtype: tuple[Response, int]
     """
-    # TODO: Validate all parameters before updating metrics
     updated_device = request.json
-    # TODO: Make sure id and type can't be changed
     # Remove ID from the received device, to ensure it doesn't overwrite an existing ID
     id_to_update = updated_device.pop("id", None)
     if id_to_update is not None and id_to_update != device_id:
@@ -427,7 +425,7 @@ def update_device_endpoint(device_id: str) -> tuple[Response, int]:
     device = devices_collection.find_one({'id': device_id}, {'_id': 0})
     if device is not None:
         app.logger.info("Validating new device configuration...")
-        success, reason = validate_device_data(updated_device)
+        success, reasons = validate_device_data(updated_device, device_type=device["type"])
         if success:
             app.logger.info(f"Success! Updating device {device_id}")
             update_device(device, updated_device)
@@ -438,7 +436,7 @@ def update_device_endpoint(device_id: str) -> tuple[Response, int]:
             )
             return jsonify({'output': "Device updated successfully"}), 200
         else:
-            return jsonify({'error': f"{reason}"}), 400
+            return jsonify({'error': reasons}), 400
     return jsonify({'error': f"Device ID {device_id} not found"}), 404
 
 

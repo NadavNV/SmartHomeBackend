@@ -110,7 +110,7 @@ def verify_type_and_range(value: Any, name: str, cls: type,
     if cls == str:
         if type(value_range) is set:
             if value not in value_range:
-                error = f"'{value}' is not a valid value for '{name}'. Must be one of {value_range}."
+                error = f"'{value}' is not a valid value for {name}. Must be one of {value_range}."
                 logger.error(error)
                 return False, error
         elif value_range == 'time':
@@ -122,77 +122,110 @@ def verify_type_and_range(value: Any, name: str, cls: type,
     return True, None
 
 
-def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
+def validate_device_data(device_data: Mapping[str, Any], *, new_device: bool = False, device_type: str = "") -> \
+        tuple[bool, list[str]]:
     """
     Verifies that new device data, either for an update or for a new device, is valid.
 
-    :param device: The device to verify
-    :return: A tuple of a boolean value indicating success and an optional reason for failure,
-        or None on success.
-    :rtype: tuple[bool, str | None]
+    :param device_data: The device data to verify
+    :type device_data: Mapping[str, Any]
+    :param new_device: Whether this is complete data for a new device, or partial data for a device update.
+        Default value is False.
+    :type new_device: bool
+    :param device_type: If the data is for an update, the device type must be provided.
+    :type device_type: str
+    :return: A tuple of a boolean value indicating success and a list of reasons for failure.
+    :rtype: tuple[bool, list[str]]
     """
-    for field in list(device.keys()):
-        if field == 'type' and device['type'] not in DEVICE_TYPES:
-            error = f"Incorrect device type {device['type']}, must be one of {DEVICE_TYPES}."
+    errors = []
+    if new_device:
+        if set(device_data.keys()) != DEVICE_PARAMETERS:
+            error = (f"Incorrect field(s) in new device: {set(device_data.keys()) - DEVICE_PARAMETERS}, "
+                     f"missing field(s) in new device: {DEVICE_PARAMETERS - set(device_data.keys())}, "
+                     f"must be exactly these fields: {DEVICE_PARAMETERS}")
             logger.error(error)
-            return False, error
+            return False, [error]
+        device_type = device_data["type"]
+    else:
+        if "id" in device_data:
+            error = "Cannot update read-only parameter 'id'"
+            logger.error(error)
+            errors.append(error)
+        if "type" in device_data:
+            error = "Cannot update read-only parameter 'type'"
+            logger.error(error)
+            errors.append(error)
+        if errors:
+            return False, errors
+    if device_type not in DEVICE_TYPES:
+        error = f"Incorrect device type {device_type}, must be one of {DEVICE_TYPES}."
+        logger.error(error)
+        return False, [error]
+    for field in device_data:
         if field == 'status':
-            if 'type' in device and device['type'] in DEVICE_TYPES:
-                match device['type']:
+            if device_type in DEVICE_TYPES:
+                match device_type:
                     case "door_lock":
                         success, reason = verify_type_and_range(
-                            value=device['status'],
+                            value=device_data['status'],
                             name="'status'",
                             cls=str,
                             value_range={'unlocked', 'locked'},
                         )
                         if not success:
-                            return False, reason
+                            errors.append(reason)
                     case "curtain":
                         success, reason = verify_type_and_range(
-                            value=device['status'],
+                            value=device_data['status'],
                             name="'status'",
                             cls=str,
                             value_range={'open', 'closed'},
                         )
                         if not success:
-                            return False, reason
+                            errors.append(reason)
                     case _:
                         success, reason = verify_type_and_range(
-                            value=device['status'],
+                            value=device_data['status'],
                             name="'status'",
                             cls=str,
                             value_range={'on', 'off'},
                         )
                         if not success:
-                            return False, reason
+                            errors.append(reason)
         if field == 'parameters':
-            if 'type' in device and device['type'] in DEVICE_TYPES:
+            if device_type in DEVICE_TYPES:
                 success, reason = verify_type_and_range(
-                    value=device['parameters'],
+                    value=device_data['parameters'],
                     name="'parameters'",
                     cls=dict,
                 )
                 if not success:
-                    return False, reason
-                left_over_parameters = set(device['parameters'].keys())
-                match device['type']:
+                    errors.append(reason)
+                    continue
+                left_over_parameters = set(device_data['parameters'].keys())
+                match device_type:
                     case "door_lock":
                         left_over_parameters -= LOCK_PARAMETERS
                         if left_over_parameters != set():
                             error = (f"Disallowed parameters for door lock {left_over_parameters}, "
                                      f"allowed parameters: {LOCK_PARAMETERS}")
                             logger.error(error)
-                            return False, error
-                        for key, value in device['parameters'].items():
+                            errors.append(error)
+                            continue
+                        for key, value in device_data['parameters'].items():
                             if key == 'auto_lock_enabled':
-                                success, reason = verify_type_and_range(
-                                    value=value,
-                                    name="'auto_lock_enabled'",
-                                    cls=bool,
-                                )
-                                if not success:
-                                    return False, reason
+                                if new_device:
+                                    success, reason = verify_type_and_range(
+                                        value=value,
+                                        name="'auto_lock_enabled'",
+                                        cls=bool,
+                                    )
+                                    if not success:
+                                        errors.append(reason)
+                                else:
+                                    error = f"Cannot update read-only parameter '{key}'."
+                                    logger.error(error)
+                                    errors.append(error)
                             elif key == 'battery_level':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -201,15 +234,16 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range=(MIN_BATTERY, MAX_BATTERY),
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                     case "curtain":
                         left_over_parameters -= CURTAIN_PARAMETERS
                         if left_over_parameters != set():
                             error = (f"Disallowed parameters for curtain {left_over_parameters}, "
                                      f"allowed parameters: {CURTAIN_PARAMETERS}")
                             logger.error(error)
-                            return False, error
-                        for key, value in device['parameters'].items():
+                            errors.append(error)
+                            continue
+                        for key, value in device_data['parameters'].items():
                             if key == 'position':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -218,15 +252,16 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range=(MIN_POSITION, MAX_POSITION),
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                     case "air_conditioner":
                         left_over_parameters -= AC_PARAMETERS
                         if left_over_parameters != set():
                             error = (f"Disallowed parameters for air conditioner {left_over_parameters}, "
                                      f"allowed parameters: {AC_PARAMETERS}")
                             logger.error(error)
-                            return False, error
-                        for key, value in device['parameters'].items():
+                            errors.append(error)
+                            continue
+                        for key, value in device_data['parameters'].items():
                             if key == 'temperature':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -235,7 +270,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range=(MIN_AC_TEMP, MAX_AC_TEMP),
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'mode':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -244,7 +279,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range=AC_MODES,
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'fan':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -253,7 +288,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range=AC_FAN_SETTINGS,
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'swing':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -262,15 +297,16 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range=AC_SWING_MODES,
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                     case "water_heater":
                         left_over_parameters -= WATER_HEATER_PARAMETERS
                         if left_over_parameters != set():
                             error = (f"Disallowed parameters for water heater {left_over_parameters}, "
                                      f"allowed parameters: {WATER_HEATER_PARAMETERS}")
                             logger.error(error)
-                            return False, error
-                        for key, value in device['parameters'].items():
+                            errors.append(error)
+                            continue
+                        for key, value in device_data['parameters'].items():
                             if key == 'temperature':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -278,7 +314,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     cls=int,
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'target_temperature':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -287,7 +323,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range=(MIN_WATER_TEMP, MAX_WATER_TEMP),
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'is_heating':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -295,7 +331,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     cls=bool,
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'timer_enabled':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -303,7 +339,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     cls=bool,
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'scheduled_on':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -312,7 +348,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range='time'
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'scheduled_off':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -321,15 +357,16 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range='time'
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                     case "light":
                         left_over_parameters -= LIGHT_PARAMETERS
                         if left_over_parameters != set():
-                            error = (f"Disallowed parameters for door lock {left_over_parameters},"
+                            error = (f"Disallowed parameters for light {left_over_parameters}, "
                                      f"allowed parameters: {LIGHT_PARAMETERS}")
                             logger.error(error)
-                            return False, error
-                        for key, value in device['parameters'].items():
+                            errors.append(error)
+                            continue
+                        for key, value in device_data['parameters'].items():
                             if key == 'brightness':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -338,7 +375,7 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range=(MIN_BRIGHTNESS, MAX_BRIGHTNESS),
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'color':
                                 success, reason = verify_type_and_range(
                                     value=value,
@@ -347,38 +384,33 @@ def validate_device_data(device: Mapping[str, Any]) -> tuple[bool, str | None]:
                                     value_range='color',
                                 )
                                 if not success:
-                                    return False, reason
+                                    errors.append(reason)
                             elif key == 'is_dimmable':
-                                success, reason = verify_type_and_range(
-                                    value=value,
-                                    name="'is_dimmable'",
-                                    cls=bool,
-                                )
-                                if not success:
-                                    return False, reason
+                                if new_device:
+                                    success, reason = verify_type_and_range(
+                                        value=value,
+                                        name="'is_dimmable'",
+                                        cls=bool,
+                                    )
+                                    if not success:
+                                        errors.append(reason)
+                                else:
+                                    error = f"Cannot update read-only parameter '{key}'."
+                                    logger.error(error)
+                                    errors.append(error)
                             elif key == 'dynamic_color':
-                                success, reason = verify_type_and_range(
-                                    value=value,
-                                    name="'dynamic_color'",
-                                    cls=bool,
-                                )
-                                if not success:
-                                    return False, reason
-    return True, None
-
-
-def validate_new_device_data(new_device: Mapping[str, Any]) -> tuple[bool, str | None]:
-    """
-    Validates that the request to add a new device contains only valid information.
-
-    :param Mapping[str, Any] new_device: The new device to verify.
-    :return: A tuple of a boolean value indicating success and an optional reason for failure,
-        or None on success.
-    :rtype: tuple[bool, str | None]
-    """
-    if set(new_device.keys()) != DEVICE_PARAMETERS:
-        error = (f"Incorrect field(s) in new device {set(new_device.keys()) ^ DEVICE_PARAMETERS}, "
-                 f"must be exactly these fields: {DEVICE_PARAMETERS}")
-        logger.error(error)
-        return False, error
-    return validate_device_data(new_device)
+                                if new_device:
+                                    success, reason = verify_type_and_range(
+                                        value=value,
+                                        name="'dynamic_color'",
+                                        cls=bool,
+                                    )
+                                    if not success:
+                                        errors.append(reason)
+                                else:
+                                    error = f"Cannot update read-only parameter '{key}'."
+                                    logger.error(error)
+                                    errors.append(error)
+    if errors:
+        return False, errors
+    return True, []
