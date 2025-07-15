@@ -6,7 +6,7 @@ from datetime import datetime, UTC, timedelta
 from flask import jsonify, request, Response
 from typing import Any, Mapping
 from prometheus_client import Gauge, Counter, Histogram
-from services.db import r
+from services.db import get_redis
 
 logging.basicConfig(
     format="[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
@@ -90,7 +90,7 @@ def record_on_interval_start(device_id: str) -> None:
     :return: None
     :rtype: None
     """
-    r.rpush(f"device_on_intervals:{device_id}", json.dumps([datetime.now().isoformat(), None]))
+    get_redis().rpush(f"device_on_intervals:{device_id}", json.dumps([datetime.now().isoformat(), None]))
 
 
 def record_on_interval_end(device_id: str) -> float | None:
@@ -108,14 +108,14 @@ def record_on_interval_end(device_id: str) -> float | None:
     :rtype: float | None
     """
     key = f"device_on_intervals:{device_id}"
-    intervals = r.lrange(key, 0, -1)
+    intervals = get_redis().lrange(key, 0, -1)
     if not intervals:
         return None
     # Update the last interval
     last_interval = json.loads(intervals[-1])
     last_interval[1] = datetime.now().isoformat()
     # Replace last item
-    r.lset(key, len(intervals) - 1, json.dumps(last_interval))
+    get_redis().lset(key, len(intervals) - 1, json.dumps(last_interval))
     start_time = datetime.fromisoformat(last_interval[0])
     end_time = datetime.fromisoformat(last_interval[1])
     return (end_time - start_time).total_seconds()
@@ -146,10 +146,10 @@ def update_device_status(device: Mapping[str, Any], new_status: str) -> None:
         logger.warning(f"Unknown binary state: {new_status}")
         return
 
-    if new_status == "on" and (not r.sismember("seen_devices", device["id"]) or device["status"] == "off"):
+    if new_status == "on" and (not get_redis().sismember("seen_devices", device["id"]) or device["status"] == "off"):
         # Starting new interval
         record_on_interval_start(device["id"])
-        if r.sismember("seen_devices", device["id"]):
+        if get_redis().sismember("seen_devices", device["id"]):
             device_on_events.labels(device_id=device["id"], device_type=device["type"]).inc()
 
     # Ending latest interval
@@ -189,7 +189,7 @@ def get_device_on_interval_at_time(device_id: str, check_time: datetime) -> tupl
     """
     # The key of the device in the Redis data structure
     key = f"device_on_intervals:{device_id}"
-    intervals = r.lrange(key, 0, -1)  # Get all intervals for the device
+    intervals = get_redis().lrange(key, 0, -1)  # Get all intervals for the device
     for interval_json in intervals:
         try:
             on_str, off_str = json.loads(interval_json)
@@ -218,7 +218,7 @@ def mark_device_read(device: Mapping[str, Any]) -> tuple[bool, str | None]:
     :rtype: tuple[bool, str | None]
     """
     device_id = device.get("id")
-    if device_id is not None and not r.sismember("seen_devices", device_id):
+    if device_id is not None and not get_redis().sismember("seen_devices", device_id):
         logger.info(f"Device {device_id} read from DB for the first time. Validating device {device}:")
         logger.info(f"Success. Adding metrics for device {device_id}")
         device_on_events.labels(device_id=device_id, device_type=device["type"]).inc(0)
@@ -226,7 +226,7 @@ def mark_device_read(device: Mapping[str, Any]) -> tuple[bool, str | None]:
         update_device_metrics(device, device)
         for key, value in device["parameters"].items():
             update_device_parameter(device, key, value)
-        r.sadd("seen_devices", device_id)
+        get_redis().sadd("seen_devices", device_id)
         return True, None
     else:
         return False, f"Device {device_id} already read."
@@ -522,7 +522,7 @@ def generate_analytics() -> tuple[Response, int]:
                 "to": to_ts.isoformat()
             },
             "aggregate": {
-                "total_devices": r.scard("seen_devices"),
+                "total_devices": get_redis().scard("seen_devices"),
                 "total_on_events": total_on_events,
                 "total_usage_minutes": total_usage
             },
