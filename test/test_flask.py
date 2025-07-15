@@ -4,6 +4,7 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 import mongomock
 import fakeredis
+from copy import deepcopy
 from main import create_app
 
 from validation.validators import (
@@ -26,9 +27,15 @@ class FlaskTest(TestCase):
 
     def setUp(self):
         # Patch the loggers
-        self.db_logger_patcher = patch('services.db.logger')
-        self.mqtt_logger_patcher = patch('services.mqtt.logger')
-        self.smart_home_logger_patcher = patch('main.smart_home_logger')
+        self.mock_logger = MagicMock()
+        self.mock_logger.error = MagicMock()
+        self.mock_logger.info = MagicMock()
+        self.mock_logger.debug = MagicMock()
+        self.db_logger_patcher = patch('services.db.logger', self.mock_logger)
+        self.mqtt_logger_patcher = patch('services.mqtt.logger', self.mock_logger)
+        self.smart_home_logger_patcher = patch('main.smart_home_logger', self.mock_logger)
+        self.validators_logger_patcher = patch('validation.validators.logger', self.mock_logger)
+        self.metrics_logger_patcher = patch('monitoring.metrics.logger', self.mock_logger)
 
         self.mark_device_read_patcher = patch('routes.mark_device_read', unittest.mock.Mock())
         self.mock_mqtt_client = fake_mqtt_client()
@@ -40,7 +47,10 @@ class FlaskTest(TestCase):
                                                     lambda *args, **kwargs: self.mock_mongo_client)
         self.redis_constructor_patch = patch('services.db.redis.Redis', lambda *args, **kwargs: self.mock_redis)
         self.mqtt_constructor_patch = patch('services.mqtt.paho.Client', lambda *args, **kwargs: self.mock_mqtt_client)
-        self.get_devices_patch = patch('routes.get_devices_collection', lambda *args, **kwargs: self.mock_collection)
+        self.routes_get_devices_patch = patch('routes.get_devices_collection',
+                                              lambda *args, **kwargs: self.mock_collection)
+        self.mqtt_get_devices_patch = patch('services.mqtt.get_devices_collection',
+                                            lambda *args, **kwargs: self.mock_collection)
         self.get_redis_patch = patch('routes.get_redis', lambda *args, **kwargs: self.mock_redis)
         self.get_mongo_client_patch = patch('routes.get_mongo_client', lambda *args, **kwargs: self.mock_mongo_client)
         self.routes_id_exists_patch = patch('routes.id_exists',
@@ -53,26 +63,21 @@ class FlaskTest(TestCase):
         self.mongo_client_constructor_patch.start()
         self.redis_constructor_patch.start()
         self.mqtt_constructor_patch.start()
-        self.get_devices_patch.start()
+        self.routes_get_devices_patch.start()
+        self.mqtt_get_devices_patch.start()
         self.get_redis_patch.start()
         self.get_mongo_client_patch.start()
         self.routes_id_exists_patch.start()
         self.mqtt_id_exists_patch.start()
-        self.mock_db_logger = self.db_logger_patcher.start()
-        self.mock_db_logger.error = MagicMock()
-        self.mock_db_logger.info = MagicMock()
-        self.mock_db_logger.debug = MagicMock()
-        self.mock_mqtt_logger = self.mqtt_logger_patcher.start()
-        self.mock_mqtt_logger.error = MagicMock()
-        self.mock_mqtt_logger.info = MagicMock()
-        self.mock_mqtt_logger.debug = MagicMock()
-        self.mock_smart_home_logger = self.smart_home_logger_patcher.start()
-        self.mock_smart_home_logger.error = MagicMock()
-        self.mock_smart_home_logger.info = MagicMock()
-        self.mock_smart_home_logger.debug = MagicMock()
+        self.db_logger_patcher.start()
+        self.mqtt_logger_patcher.start()
+        self.smart_home_logger_patcher.start()
+        self.validators_logger_patcher.start()
+        self.metrics_logger_patcher.start()
 
         self.app = create_app()
         self.app.testing = True
+        self.app.logger = self.mock_logger
         self.client = self.app.test_client()
         self.valid_water_heater = {
             "id": "main-water-heater",
@@ -91,17 +96,21 @@ class FlaskTest(TestCase):
         }
 
     def tearDown(self):
+        self.validators_logger_patcher.stop()
+        self.metrics_logger_patcher.stop()
+        self.mqtt_get_devices_patch.stop()
+        self.smart_home_logger_patcher.stop()
         self.mark_device_read_patcher.stop()
         self.get_mongo_client_patch.stop()
         self.get_redis_patch.stop()
-        self.get_devices_patch.stop()
+        self.routes_get_devices_patch.stop()
         self.mqtt_id_exists_patch.stop()
         self.routes_id_exists_patch.stop()
         self.db_logger_patcher.stop()
         self.mqtt_logger_patcher.stop()
         self.mock_collection.delete_many({})
         self.mongo_client_constructor_patch.stop()
-        self.get_devices_patch.stop()
+        self.routes_get_devices_patch.stop()
         self.redis_constructor_patch.stop()
         self.mqtt_constructor_patch.stop()
 
@@ -152,7 +161,7 @@ class FlaskTest(TestCase):
         ], any_order=True)
 
     def test_get_device_id_valid(self):
-        self.mock_collection.insert_many([{"id": "main-water-heater"}])
+        self.mock_collection.insert_one({"id": "main-water-heater"})
         res = self.client.get('/api/devices/main-water-heater')
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.content_type, 'application/json')
@@ -160,26 +169,26 @@ class FlaskTest(TestCase):
         self.mark_device_read.assert_called_with({"id": "main-water-heater"})
 
     def test_get_device_id_invalid(self):
-        self.mock_collection.insert_many([{"id": "main-water-heater"}])
+        self.mock_collection.insert_one({"id": "main-water-heater"})
         res = self.client.get('/api/devices/steve')
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.content_type, 'application/json')
         self.assertEqual(res.get_json(), {"error": "ID steve not found"})
 
     def test_post_device_valid(self):
-        device = self.valid_water_heater
-        res = self.client.post('/api/devices/main-water-heater', json=json.dumps(device))
+        device = deepcopy(self.valid_water_heater)
+        res = self.client.post('/api/devices', json=device)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.content_type, 'application/json')
         self.assertEqual(res.get_json(), {'output': "Device added successfully"})
-        self.assertEqual(device, self.mock_collection.find_one({"id": "main-water-heater"}, {"_id": 0}))
+        self.assertEqual(self.valid_water_heater,
+                         self.mock_collection.find_one({"id": "main-water-heater"}, {"_id": 0}))
         self.mock_mqtt_client.publish.assert_called()
 
     def test_post_device_invalid_duplicate_id(self):
-        device = self.valid_water_heater
-        self.mock_collection.insert_one(device)
-        print(device)
-        res = self.client.post('/api/devices/main-water-heater', json=json.dumps(device))
+        device = deepcopy(self.valid_water_heater)
+        self.mock_collection.insert_one(deepcopy(device))
+        res = self.client.post('/api/devices', json=device)
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.content_type, 'application/json')
         self.assertEqual(res.get_json(), {'error': f"ID {device["id"]} already exists"})
@@ -200,7 +209,7 @@ class FlaskTest(TestCase):
                 "scheduled_off": "08:00"
             }
         }
-        res = self.client.post('/api/devices/main-water-heater', json=json.dumps(device))
+        res = self.client.post('/api/devices', json=device)
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.content_type, 'application/json')
         self.assertIn("error", res.get_json())
@@ -212,8 +221,8 @@ class FlaskTest(TestCase):
         ])
 
     def test_delete_device_valid(self):
-        device = self.valid_water_heater
-        self.mock_collection.insert_one(device)
+        device = deepcopy(self.valid_water_heater)
+        self.mock_collection.insert_one(deepcopy(device))
         res = self.client.delete('/api/devices/main-water-heater')
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.content_type, 'application/json')
@@ -228,15 +237,15 @@ class FlaskTest(TestCase):
         self.assertEqual(res.get_json(), {'error': "ID main-water-heater not found"})
 
     def test_put_device_valid(self):
-        device = self.valid_water_heater
-        self.mock_collection.insert_one(device)
+        device = deepcopy(self.valid_water_heater)
+        self.mock_collection.insert_one(deepcopy(device))
         update = {
             "name": "Main Water Heater 34",
             "parameters": {
                 "target_temperature": (MIN_WATER_TEMP + MAX_WATER_TEMP) / 2,
             }
         }
-        res = self.client.put('/api/devices/main-water-heater', json=json.dumps(update))
+        res = self.client.put('/api/devices/main-water-heater', json=update)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.content_type, 'application/json')
         self.assertEqual(res.get_json(), {'output': "Device updated successfully"})
@@ -249,7 +258,7 @@ class FlaskTest(TestCase):
                 "target_temperature": (MIN_WATER_TEMP + MAX_WATER_TEMP) / 2,
             }
         }
-        res = self.client.put('/api/devices/main-water-heater', json=json.dumps(update))
+        res = self.client.put('/api/devices/main-water-heater', json=update)
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.content_type, 'application/json')
         self.assertEqual(res.get_json(), {'error': "ID main-water-heater not found"})
@@ -262,26 +271,30 @@ class FlaskTest(TestCase):
                 "target_temperature": (MIN_WATER_TEMP + MAX_WATER_TEMP) / 2,
             }
         }
-        res = self.client.put('/api/devices/air-conditioner', json=json.dumps(update))
+        res = self.client.put('/api/devices/air-conditioner', json=update)
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.content_type, 'application/json')
         self.assertEqual(res.get_json(),
                          {'error': f"ID mismatch: ID in URL: air-conditioner, ID in payload: main-water-heater"})
 
     def test_put_device_invalid_read_only(self):
+        self.mock_collection.insert_one(deepcopy(self.valid_water_heater))
         update = {
             "id": "main-water-heater",
         }
-        res = self.client.put('/api/devices/main-water-heater', json=json.dumps(update))
+        res = self.client.put('/api/devices/main-water-heater', json=update)
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.content_type, 'application/json')
-        self.assertEqual(res.get_json(), {'error': "Cannot update read-only parameter 'id'"})
+        self.assertEqual(res.get_json(), {'error': ["Cannot update read-only parameter 'id'"]})
 
     def test_put_device_invalid_validation(self):
+        self.mock_collection.insert_one(deepcopy(self.valid_water_heater))
         update = {
-            "target_temperature": MIN_WATER_TEMP - 1,
+            "parameters": {
+                "target_temperature": MIN_WATER_TEMP - 1,
+            }
         }
-        res = self.client.put('/api/devices/main-water-heater', json=json.dumps(update))
+        res = self.client.put('/api/devices/main-water-heater', json=update)
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.content_type, 'application/json')
         self.assertEqual(res.get_json(), {'error': [

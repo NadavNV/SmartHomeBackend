@@ -156,8 +156,7 @@ def setup_routes(app) -> None:
         :rtype: tuple[Response, int]
         """
         updated_device = request.json
-        # Remove ID from the received device, to ensure it doesn't overwrite an existing ID
-        id_to_update = updated_device.pop("id", None)
+        id_to_update = updated_device.get("id", None)
         if id_to_update is not None and id_to_update != device_id:
             error = f"ID mismatch: ID in URL: {device_id}, ID in payload: {id_to_update}"
             app.logger.error(error)
@@ -177,7 +176,7 @@ def setup_routes(app) -> None:
                 return jsonify({'output': "Device updated successfully"}), 200
             else:
                 return jsonify({'error': reasons}), 400
-        return jsonify({'error': f"Device ID {device_id} not found"}), 404
+        return jsonify({'error': f"ID {device_id} not found"}), 404
 
     @app.get("/api/devices/analytics")
     def device_analytics() -> tuple[Response, int]:

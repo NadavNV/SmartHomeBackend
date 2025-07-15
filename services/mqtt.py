@@ -8,7 +8,7 @@ from paho.mqtt.packettypes import PacketTypes
 from typing import Any, cast, Mapping
 
 from monitoring.metrics import update_device_status, update_device_metrics
-from services.db import devices_collection, id_exists
+from services.db import get_devices_collection, id_exists
 from validation.validators import validate_device_data
 
 logging.basicConfig(
@@ -118,7 +118,7 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
     if len(topic_parts) == 4:
         device_id = topic_parts[2]
         method = topic_parts[-1]
-        device = devices_collection.find_one({"id": device_id}, {"_id": 0})
+        device = get_devices_collection().find_one({"id": device_id}, {"_id": 0})
         if device is None:
             logger.error(f"Device ID {device_id} not found")
             return
@@ -142,7 +142,7 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
                     if id_exists(device_id):
                         logger.error(f"ID {device_id} already exists")
                         return
-                    devices_collection.insert_one(payload)
+                    get_devices_collection().insert_one(payload)
                     logger.info("Device added successfully")
                     return
                 else:
@@ -153,7 +153,7 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
                     if device["status"] == "on":
                         # Calculate device usage, etc.
                         update_device_status(device, "off")
-                    devices_collection.delete_one({"id": device_id})
+                    get_devices_collection().delete_one({"id": device_id})
                     logger.info("Device deleted successfully")
                     return
                 logger.error(f"ID {device_id} not found")
@@ -182,7 +182,7 @@ def update_device(old_device: Mapping[str, Any], updated_device: Mapping[str, An
             for param, param_value in updated_device[key].items():
                 update_fields[f"parameters.{param}"] = param_value
     # Find device by id and update the fields with 'set'
-    devices_collection.update_one(
+    get_devices_collection().update_one(
         {"id": old_device["id"]},
         {"$set": update_fields}
     )
@@ -201,6 +201,7 @@ def publish_mqtt(contents: dict[str, Any], device_id: str, method: str) -> None:
     :rtype: None
     """
     topic = f"nadavnv-smart-home/devices/{device_id}/{method}"
+    contents.pop("_id", None)  # Make sure the contents are serializable
     payload = json.dumps({
         "contents": contents,
     })
