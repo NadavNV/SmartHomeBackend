@@ -7,18 +7,17 @@ from paho.mqtt.properties import Properties
 from paho.mqtt.packettypes import PacketTypes
 import json
 import atexit
-from pymongo.mongo_client import MongoClient
-from pymongo.server_api import ServerApi
-from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure
 from dotenv import load_dotenv
 import os
 import time
-import random
-import sys
-import redis
+from redis.exceptions import ConnectionError
 import logging.handlers
 from prometheus_client import generate_latest
-from services.redis_client import r
+
+# Databases
+from services.db import r
+from services.db import mongo_client, devices_collection
+from pymongo.errors import ConnectionFailure, OperationFailure
 
 # Validation
 from validation.validators import validate_device_data
@@ -64,35 +63,6 @@ RETRIES = 5
 # Setting up the MQTT client
 BROKER_HOST = os.getenv("BROKER_HOST", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
-
-MONGO_DB_CONNECTION_STRING = os.getenv("MONGO_DB_CONNECTION_STRING")
-MONGO_USER = os.getenv("MONGO_USER")
-MONGO_PASS = os.getenv("MONGO_PASS")
-
-# Database parameters
-uri = MONGO_DB_CONNECTION_STRING if MONGO_DB_CONNECTION_STRING is not None else (
-    f"mongodb+srv://{MONGO_USER}:{MONGO_PASS}"
-    f"@smart-home-devices.u2axxrl.mongodb.net/?retryWrites=true&w=majority&appName=smart-home-devices"
-)
-try:
-    mongo_client = MongoClient(uri, server_api=ServerApi('1'))
-except ConfigurationError:
-    app.logger.exception("Failed to connect to database. Shutting down.")
-    sys.exit(1)
-
-for attempt in range(RETRIES):
-    try:
-        mongo_client.admin.command('ping')
-    except (ConnectionFailure, OperationFailure):
-        if attempt + 1 == RETRIES:
-            app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Shutting down.")
-            sys.exit(1)
-        delay = 2 ** attempt + random.random()
-        app.logger.exception(f"Attempt {attempt + 1}/{RETRIES} failed. Retrying in {delay:.2f} seconds...")
-        time.sleep(delay)
-
-db = mongo_client["smart-home-devices"]
-devices_collection = db["devices"]
 
 client_id = f"flask-backend-{os.getenv('HOSTNAME')}"
 mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2, protocol=paho.MQTTv5, client_id=client_id)
@@ -179,7 +149,6 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
             return
         match method:
             case "update":
-                # TODO: Make sure id and type can't be changed
                 # Update an existing device
                 if "id" in payload and payload["id"] != device_id:
                     app.logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
@@ -501,7 +470,7 @@ def ready_check():
             app.logger.debug("Redis ping failed.")
             return jsonify({"Status": "Not ready"}), 500
 
-    except (ConnectionFailure, OperationFailure, redis.exceptions.ConnectionError):
+    except (ConnectionFailure, OperationFailure, ConnectionError):
         app.logger.exception("Dependency check failed.")
         return jsonify({"Status": "Not ready"}), 500
 

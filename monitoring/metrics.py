@@ -1,12 +1,28 @@
 import config.env  # noqa: F401  # load_dotenv side effect
-import logging
+import logging.handlers
 import json
 import requests
 from datetime import datetime, UTC, timedelta
 from flask import jsonify, request, Response
 from typing import Any, Mapping
 from prometheus_client import Gauge, Counter, Histogram
-from services.redis_client import r
+from services.db import r
+
+logging.basicConfig(
+    format="[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
+    handlers=[
+        # Prints to sys.stderr
+        logging.StreamHandler(),
+        # Writes to a log file which rotates every 1mb, or gets overwritten when the app is restarted
+        logging.handlers.RotatingFileHandler(
+            filename="backend.log",
+            mode='w',
+            maxBytes=1024 * 1024,
+            backupCount=3
+        )
+    ],
+    level=logging.INFO,
+)
 
 logger = logging.getLogger("smart_home.monitoring.metrics")
 

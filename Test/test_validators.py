@@ -1,3 +1,4 @@
+import random
 import unittest
 from unittest.mock import MagicMock, patch
 from validation.validators import (
@@ -55,11 +56,14 @@ class TestValidation(unittest.TestCase):
         self.assertTrue(verify_type_and_range("#FFF", "color", str, "color")[0])
         self.assertTrue(verify_type_and_range("#ffcc00", "color", str, "color")[0])
         self.assertFalse(verify_type_and_range("blue", "color", str, "color")[0])
-        for num in range(2 ** 24, 578):
+        num = 0
+        while num < 2 ** 24:
             with self.subTest(num=num, color=int_to_hex_color(num)):
                 self.assertTrue(verify_type_and_range(int_to_hex_color(num), "color", str, "color")[0])
                 if num < 2 ** 12:
                     self.assertTrue(verify_type_and_range("#" + hex(num)[2:].zfill(3), "color", str, "color")[0])
+                # Random step to test many different numbers without running out of memory
+                num += random.randint(400, 1000)
 
     def test_verify_type_and_range_wrong_type(self):
         self.assertFalse(verify_type_and_range(123, "status", str, {"on", "off"})[0])
