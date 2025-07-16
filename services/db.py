@@ -1,4 +1,4 @@
-import config.env  # noqa: F401  # load_dotenv side effect
+from config import env  # noqa: F401  # load_dotenv side effect
 import os
 import sys
 import redis

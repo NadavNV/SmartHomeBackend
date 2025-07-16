@@ -1,4 +1,4 @@
-import config.env  # noqa: F401  # load_dotenv side effect
+from config import env  # noqa: F401  # load_dotenv side effect
 from flask import jsonify, request, Response
 import time
 from redis.exceptions import ConnectionError
