@@ -1,7 +1,6 @@
-import json
 import unittest
 from unittest import TestCase
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 import mongomock
 import fakeredis
 from copy import deepcopy
@@ -28,31 +27,25 @@ class FlaskTest(TestCase):
     def setUp(self):
         # Patch the loggers
         self.mock_logger = MagicMock()
-        self.mock_logger.error = MagicMock()
-        self.mock_logger.info = MagicMock()
-        self.mock_logger.debug = MagicMock()
         self.db_logger_patcher = patch('services.db.logger', self.mock_logger)
         self.mqtt_logger_patcher = patch('services.mqtt.logger', self.mock_logger)
         self.smart_home_logger_patcher = patch('main.smart_home_logger', self.mock_logger)
         self.validators_logger_patcher = patch('validation.validators.logger', self.mock_logger)
         self.metrics_logger_patcher = patch('monitoring.metrics.logger', self.mock_logger)
 
-        self.mark_device_read_patcher = patch('routes.mark_device_read', unittest.mock.Mock())
+        self.mark_device_read_patcher = patch('routes.mark_device_read', MagicMock())
         self.mock_mqtt_client = fake_mqtt_client()
         self.mock_mongo_client = mongomock.MongoClient()
         self.mock_redis = fakeredis.FakeRedis()
         self.mock_collection = self.mock_mongo_client.smarthome.devices
 
-        self.mongo_client_constructor_patch = patch('services.db.MongoClient',
-                                                    lambda *args, **kwargs: self.mock_mongo_client)
-        self.redis_constructor_patch = patch('services.db.redis.Redis', lambda *args, **kwargs: self.mock_redis)
-        self.mqtt_constructor_patch = patch('services.mqtt.paho.Client', lambda *args, **kwargs: self.mock_mqtt_client)
-        self.routes_get_devices_patch = patch('routes.get_devices_collection',
-                                              lambda *args, **kwargs: self.mock_collection)
-        self.mqtt_get_devices_patch = patch('services.mqtt.get_devices_collection',
-                                            lambda *args, **kwargs: self.mock_collection)
-        self.get_redis_patch = patch('routes.get_redis', lambda *args, **kwargs: self.mock_redis)
-        self.get_mongo_client_patch = patch('routes.get_mongo_client', lambda *args, **kwargs: self.mock_mongo_client)
+        self.mongo_client_constructor_patch = patch('services.db.MongoClient', return_value=self.mock_mongo_client)
+        self.redis_constructor_patch = patch('services.db.redis.Redis', return_value=self.mock_redis)
+        self.mqtt_constructor_patch = patch('services.mqtt.paho.Client', return_value=self.mock_mqtt_client)
+        self.routes_get_devices_patch = patch('routes.get_devices_collection', return_value=self.mock_collection)
+        self.mqtt_get_devices_patch = patch('services.mqtt.get_devices_collection', return_value=self.mock_collection)
+        self.get_redis_patch = patch('routes.get_redis', return_value=self.mock_redis)
+        self.get_mongo_client_patch = patch('routes.get_mongo_client', return_value=self.mock_mongo_client)
         self.routes_id_exists_patch = patch('routes.id_exists',
                                             lambda device_id: self.mock_collection.find_one({"id": device_id},
                                                                                             {'_id': 0}))
@@ -153,11 +146,11 @@ class FlaskTest(TestCase):
                          [{"id": "main-water-heater"}, {"id": "living-room-light"}, {"id": "bedroom-ac"},
                           {"id": "front-door-lock"}, {"id": "living-room-curtains"}])
         self.mark_device_read.assert_has_calls([
-            unittest.mock.call({"id": "main-water-heater"}),
-            unittest.mock.call({"id": "living-room-light"}),
-            unittest.mock.call({"id": "bedroom-ac"}),
-            unittest.mock.call({"id": "front-door-lock"}),
-            unittest.mock.call({"id": "living-room-curtains"}),
+            call({"id": "main-water-heater"}),
+            call({"id": "living-room-light"}),
+            call({"id": "bedroom-ac"}),
+            call({"id": "front-door-lock"}),
+            call({"id": "living-room-curtains"}),
         ], any_order=True)
 
     def test_get_device_id_valid(self):

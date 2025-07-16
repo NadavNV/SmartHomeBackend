@@ -38,12 +38,12 @@ class MQTTNotInitializedError(Exception):
 # Setting up the MQTT client
 BROKER_HOST = os.getenv("BROKER_HOST", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
+CLIENT_ID = f"flask-backend-{os.getenv('HOSTNAME')}"
 
-client_id = f"flask-backend-{os.getenv('HOSTNAME')}"
 mqtt: paho.Client | None = None
 
 
-def on_connect(client: paho.Client, _userdata, _connect_flags, reason_code, _properties) -> None:
+def on_connect(client: paho.Client, _userdata, _connect_flags, reason_code, _properties=None) -> None:
     """
     Function to run after the MQTT client finishes connecting to the broker. Logs the
     connection and subscribes to the project topic.
@@ -101,29 +101,28 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
         logger.error("Message missing sender")
     if sender_group is None:
         logger.error("Message missing sender group")
-    if sender_id == client_id or sender_group == "backend":
+    if sender_id == CLIENT_ID or sender_group == "backend":
         # Ignore backend messages
         return
 
     logger.info(f"MQTT Message Received on {msg.topic}")
-    payload = cast(bytes, msg.payload)
+    payload = cast(bytes, msg.payload)  # to avoid linter warnings
     try:
         payload = json.loads(payload.decode("utf-8"))
     except UnicodeDecodeError as e:
         logger.exception(f"Error decoding payload: {e.reason}")
         return
-    payload = payload["contents"]
     # Extract device_id from topic: expected format nadavnv-smart-home/devices/<device_id>/<method>
     topic_parts = msg.topic.split('/')
     if len(topic_parts) == 4:
-        device_id = topic_parts[2]
+        device_id = topic_parts[-2]
         method = topic_parts[-1]
-        device = get_devices_collection().find_one({"id": device_id}, {"_id": 0})
-        if device is None:
-            logger.error(f"Device ID {device_id} not found")
-            return
         match method:
             case "update":
+                device = get_devices_collection().find_one({"id": device_id}, {"_id": 0})
+                if device is None:
+                    logger.error(f"Device ID {device_id} not found")
+                    return
                 # Update an existing device
                 if "id" in payload and payload["id"] != device_id:
                     logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
@@ -131,13 +130,17 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
                 success, reasons = validate_device_data(payload, device_type=device["type"])
                 if success:
                     update_device(device, payload)
+                    logger.info("Device updated successfully")
+                    return
+                else:
+                    logger.error(f"Validation failed, reasons: {reasons}")
                     return
             case "post":
                 # Add a new device to the database
                 if "id" in payload and payload["id"] != device_id:
                     logger.error(f"ID mismatch: ID in URL: {device_id}, ID in payload: {payload['id']}")
                     return
-                success, reason = validate_device_data(payload, new_device=True)
+                success, reasons = validate_device_data(payload, new_device=True)
                 if success:
                     if id_exists(device_id):
                         logger.error(f"ID {device_id} already exists")
@@ -146,17 +149,19 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
                     logger.info("Device added successfully")
                     return
                 else:
+                    logger.error(f"Validation failed, reasons: {reasons}")
                     return
             case "delete":
-                # Remove a device from the database
-                if id_exists(device_id):
-                    if device["status"] == "on":
-                        # Calculate device usage, etc.
-                        update_device_status(device, "off")
-                    get_devices_collection().delete_one({"id": device_id})
-                    logger.info("Device deleted successfully")
+                device = get_devices_collection().find_one({"id": device_id}, {"_id": 0})
+                if device is None:
+                    logger.error(f"Device ID {device_id} not found")
                     return
-                logger.error(f"ID {device_id} not found")
+                # Remove a device from the database
+                if device["status"] == "on":
+                    # Calculate metrics for device usage, etc.
+                    update_device_status(device, "off")
+                get_devices_collection().delete_one({"id": device_id})
+                logger.info("Device deleted successfully")
                 return
             case _:
                 logger.error(f"Unknown method: {method}")
@@ -188,25 +193,23 @@ def update_device(old_device: Mapping[str, Any], updated_device: Mapping[str, An
     )
 
 
-def publish_mqtt(contents: dict[str, Any], device_id: str, method: str) -> None:
+def publish_mqtt(payload: dict[str, Any], device_id: str, method: str) -> None:
     """
     Publishes the MQTT message to the broker.
 
     Formats the message and adds appropriate sender id and sender group tags.
 
-    :param dict[str, Any] contents: The message to be published.
+    :param dict[str, Any] payload: The message to be published.
     :param str device_id: ID of the device the message is about.
     :param str method: The method to attach to the topic, either "update", "post" or "delete".
     :return: None
     :rtype: None
     """
     topic = f"nadavnv-smart-home/devices/{device_id}/{method}"
-    contents.pop("_id", None)  # Make sure the contents are serializable
-    payload = json.dumps({
-        "contents": contents,
-    })
+    payload.pop("_id", None)  # Make sure the payload is serializable
+    payload = json.dumps(payload)
     properties = Properties(PacketTypes.PUBLISH)
-    properties.UserProperty = [("sender_id", client_id), ("sender_group", "backend")]
+    properties.UserProperty = [("sender_id", CLIENT_ID), ("sender_group", "backend")]
     mqtt.publish(topic, payload.encode("utf-8"), qos=2, properties=properties)
 
 
@@ -218,7 +221,7 @@ def init_mqtt() -> None:
     :rtype: None
     """
     global mqtt
-    mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2, protocol=paho.MQTTv5, client_id=client_id)
+    mqtt = paho.Client(paho.CallbackAPIVersion.VERSION2, protocol=paho.MQTTv5, client_id=CLIENT_ID)
     mqtt.on_connect = on_connect
     mqtt.on_disconnect = on_disconnect
     mqtt.on_message = on_message

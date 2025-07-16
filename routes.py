@@ -113,7 +113,7 @@ def setup_routes(app) -> None:
                 get_devices_collection().insert_one(new_device)
                 mark_device_read(new_device)
                 publish_mqtt(
-                    contents=new_device,
+                    payload=new_device,
                     device_id=new_device['id'],
                     method="post",
                 )
@@ -135,7 +135,7 @@ def setup_routes(app) -> None:
             get_redis().srem("seen_devices", device_id)  # Allows adding a new device with old id
             get_devices_collection().delete_one({"id": device_id})
             publish_mqtt(
-                contents={},
+                payload={},
                 device_id=device_id,
                 method="delete",
             )
@@ -169,7 +169,7 @@ def setup_routes(app) -> None:
                 app.logger.info(f"Success! Updating device {device_id}")
                 update_device(device, updated_device)
                 publish_mqtt(
-                    contents=updated_device,
+                    payload=updated_device,
                     device_id=device_id,
                     method="update",
                 )

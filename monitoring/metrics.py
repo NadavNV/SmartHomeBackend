@@ -1,4 +1,5 @@
 import config.env  # noqa: F401  # load_dotenv side effect
+import os
 import logging.handlers
 import json
 import requests
@@ -7,6 +8,10 @@ from flask import jsonify, request, Response
 from typing import Any, Mapping
 from prometheus_client import Gauge, Counter, Histogram
 from services.db import get_redis
+
+from validation.validators import (
+    AC_MODES, AC_FAN_SETTINGS, AC_SWING_MODES
+)
 
 logging.basicConfig(
     format="[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
@@ -26,7 +31,7 @@ logging.basicConfig(
 
 logger = logging.getLogger("smart_home.monitoring.metrics")
 
-PROMETHEUS_URL = "http://prometheus-svc.smart-home.svc.cluster.local:9090"
+PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-svc.smart-home.svc.cluster.local:9090")
 # Prometheus metrics
 # HTTP request metrics
 request_count = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
@@ -65,6 +70,8 @@ light_color = Gauge("light_color", "Current light color as decimal RGB",
                     ["device_id", "dynamic_color"])
 light_color_info = Gauge("light_color_info", "Current light color as label",
                          ["device_id", "dynamic_color", "color"])
+light_is_dimmable = Gauge("light_is_dimmable", "Is this light dimmable", ["device_id", "state"])
+light_dynamic_color = Gauge("light_dynamic_color", "Does this light have dynamic color", ["device_id", "state"])
 # Door lock
 lock_status = Gauge("lock_status", "Locked/unlocked status", ["device_id", "state"])
 auto_lock_enabled = Gauge("auto_lock_enabled", "Auto-lock enabled",
@@ -72,6 +79,7 @@ auto_lock_enabled = Gauge("auto_lock_enabled", "Auto-lock enabled",
 lock_battery_level = Gauge("lock_battery_level", "Battery level", ["device_id"])
 # Curtain
 curtain_status = Gauge("curtain_status", "Open/closed status", ["device_id", "state"])
+curtain_position = Gauge("curtain_position", "Current position (%)", ["device_id"])
 
 
 # Redis-backed interval tracking
@@ -244,9 +252,9 @@ def update_device_metrics(old_device: Mapping[str, Any], updated_device: Mapping
     :rtype: None
     """
     for key, value in updated_device.items():
-        logger.info(f"Setting parameter '{key}' to value '{value}'")
         match key:
             case "name" | "room":
+                logger.info(f"Setting parameter '{key}' to value '{value}'")
                 # Mark old metadata stale, set new data valid
                 # If it's the same value, it's set to 0 then
                 # back to 1 immediately
@@ -261,6 +269,7 @@ def update_device_metrics(old_device: Mapping[str, Any], updated_device: Mapping
                     value=value,
                 ).set(1)
             case "status":
+                logger.info(f"Setting parameter '{key}' to value '{value}'")
                 update_device_status(old_device, value)
             case "parameters":
                 for param, param_value in value.items():
@@ -279,6 +288,7 @@ def update_device_parameter(device: Mapping[str, Any], param: str, param_value: 
     :return: None
     :rtype: None
     """
+    logger.info(f"Setting parameter '{param}' to value '{param_value}'")
     match device["type"]:
         case "water_heater":
             match param:
@@ -326,9 +336,18 @@ def update_device_parameter(device: Mapping[str, Any], param: str, param_value: 
                         device_id=device["id"],
                         dynamic_color=str(device["parameters"]["dynamic_color"]),
                     ).set(int("0x" + param_value[1:], 16))
-                case "is_dimmable" | "dynamic_color":
-                    # Read-only parameter, not tracking in metrics
-                    pass
+                case "is_dimmable":
+                    flip_device_boolean_flag(
+                        metric=light_is_dimmable,
+                        new_value=param_value,
+                        device_id=device["id"],
+                    )
+                case "dynamic_color":
+                    flip_device_boolean_flag(
+                        metric=light_dynamic_color,
+                        new_value=param_value,
+                        device_id=device["id"],
+                    )
         case "air_conditioner":
             match param:
                 case "temperature":
@@ -336,21 +355,21 @@ def update_device_parameter(device: Mapping[str, Any], param: str, param_value: 
                         device_id=device["id"],
                     ).set(param_value)
                 case "mode":
-                    modes = ["cool", "heat", "fan"]
+                    modes = AC_MODES
                     for mode in modes:
                         ac_mode_status.labels(
                             device_id=device["id"],
                             mode=mode,
                         ).set(1 if mode == param_value else 0)
                 case "fan_speed":
-                    modes = ["off", "low", "medium", "high"]
+                    modes = AC_FAN_SETTINGS
                     for mode in modes:
                         ac_fan_status.labels(
                             device_id=device["id"],
                             mode=param_value,
                         ).set(1 if mode == param_value else 0)
                 case "swing":
-                    modes = ["off", "on", "auto"]
+                    modes = AC_SWING_MODES
                     for mode in modes:
                         ac_swing_status.labels(
                             device_id=device["id"],
@@ -359,8 +378,11 @@ def update_device_parameter(device: Mapping[str, Any], param: str, param_value: 
         case "door_lock":
             match param:
                 case "auto_lock_enabled":
-                    # Read-only parameter, not tracked in metrics
-                    pass
+                    flip_device_boolean_flag(
+                        metric=auto_lock_enabled,
+                        new_value=param_value,
+                        device_id=device["id"],
+                    )
                 case "battery_level":
                     lock_battery_level.labels(
                         device_id=device["id"],
@@ -368,8 +390,9 @@ def update_device_parameter(device: Mapping[str, Any], param: str, param_value: 
         case "curtain":
             match param:
                 case "position":
-                    # Read-only parameter, not tracked in metrics
-                    pass
+                    curtain_position.labels(
+                        device_id=device["id"]
+                    ).set(param_value)
 
 
 def query_prometheus(query: str) -> list[dict[str, Any]] | dict[str, str]:
