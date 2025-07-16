@@ -52,6 +52,7 @@ messages from the different devices to update and maintain a MongoDB database as
 - `PROMETHEUS_URL` - The url of your prometheus server for tracking metrics, including port number.
 - `BROKER_HOST` - Hostname of the MQTT broker used to manage device messages. Defaults to `test.mosquitto.org`.
 - `BROKER_PORT` - The port to connect to. Defaults to `1883`.
+- `MQTT_TOPIC` - The MQTT topic to subscribe to, e.g. `project/devices`.
 
 ### Running The App
 

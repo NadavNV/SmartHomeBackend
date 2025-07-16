@@ -22,6 +22,7 @@ class MQTTNotInitializedError(Exception):
 # Setting up the MQTT client
 BROKER_HOST = os.getenv("BROKER_HOST", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "nadavnv-smart-home/devices/")
 CLIENT_ID = f"flask-backend-{os.getenv('HOSTNAME')}"
 
 mqtt: paho.Client | None = None
@@ -43,7 +44,7 @@ def on_connect(client: paho.Client, _userdata, _connect_flags, reason_code, _pro
     logger.info(f'CONNACK received with code {reason_code}.')
     if reason_code == 0:
         logger.info("Connected successfully")
-        client.subscribe("$share/backend/nadavnv-smart-home/devices/#")
+        client.subscribe(f"$share/backend/{MQTT_TOPIC}/#")
     else:
         logger.error(f"Connection failed with code {reason_code}")
 
@@ -96,7 +97,7 @@ def on_message(_mqtt_client, _userdata, msg: paho.MQTTMessage) -> None:
     except UnicodeDecodeError as e:
         logger.exception(f"Error decoding payload: {e.reason}")
         return
-    # Extract device_id from topic: expected format nadavnv-smart-home/devices/<device_id>/<method>
+    # Extract device_id from topic: expected format nadavnv-smart-home/devices/<device_id>/<method> or similar
     topic_parts = msg.topic.split('/')
     if len(topic_parts) == 4:
         device_id = topic_parts[-2]
@@ -189,7 +190,7 @@ def publish_mqtt(payload: dict[str, Any], device_id: str, method: str) -> None:
     :return: None
     :rtype: None
     """
-    topic = f"nadavnv-smart-home/devices/{device_id}/{method}"
+    topic = f"{MQTT_TOPIC}/{device_id}/{method}"
     payload.pop("_id", None)  # Make sure the payload is serializable
     payload = json.dumps(payload)
     properties = Properties(PacketTypes.PUBLISH)
