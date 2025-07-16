@@ -13,22 +13,6 @@ from validation.validators import (
     AC_MODES, AC_FAN_SETTINGS, AC_SWING_MODES
 )
 
-logging.basicConfig(
-    format="[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
-    handlers=[
-        # Prints to sys.stderr
-        logging.StreamHandler(),
-        # Writes to a log file which rotates every 1mb, or gets overwritten when the app is restarted
-        logging.handlers.RotatingFileHandler(
-            filename="backend.log",
-            mode='w',
-            maxBytes=1024 * 1024,
-            backupCount=3
-        )
-    ],
-    level=logging.INFO,
-)
-
 logger = logging.getLogger("smart_home.monitoring.metrics")
 
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-svc.smart-home.svc.cluster.local:9090")
@@ -98,7 +82,7 @@ def record_on_interval_start(device_id: str) -> None:
     :return: None
     :rtype: None
     """
-    get_redis().rpush(f"device_on_intervals:{device_id}", json.dumps([datetime.now().isoformat(), None]))
+    get_redis().rpush(f"device_on_intervals:{device_id}", json.dumps([datetime.now(UTC).isoformat(), None]))
 
 
 def record_on_interval_end(device_id: str) -> float | None:
@@ -121,7 +105,7 @@ def record_on_interval_end(device_id: str) -> float | None:
         return None
     # Update the last interval
     last_interval = json.loads(intervals[-1])
-    last_interval[1] = datetime.now().isoformat()
+    last_interval[1] = datetime.now(UTC).isoformat()
     # Replace last item
     get_redis().lset(key, len(intervals) - 1, json.dumps(last_interval))
     start_time = datetime.fromisoformat(last_interval[0])

@@ -6,6 +6,9 @@ from routes import setup_routes
 from services.db import init_db, get_mongo_client, get_redis
 from services.mqtt import init_mqtt, get_mqtt
 import atexit
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(
     format="[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
