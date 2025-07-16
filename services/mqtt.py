@@ -22,7 +22,7 @@ class MQTTNotInitializedError(Exception):
 # Setting up the MQTT client
 BROKER_HOST = os.getenv("BROKER_HOST", "test.mosquitto.org")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
-MQTT_TOPIC = os.getenv("MQTT_TOPIC", "nadavnv-smart-home/devices/")
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "nadavnv-smart-home/devices")
 CLIENT_ID = f"flask-backend-{os.getenv('HOSTNAME')}"
 
 mqtt: paho.Client | None = None
