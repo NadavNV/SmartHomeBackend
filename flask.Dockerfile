@@ -10,6 +10,7 @@ COPY validation/ validation/
 COPY monitoring/ monitoring/
 COPY config/ config/
 COPY services/ services/
+COPY test/ test/
 
 EXPOSE 8000
 
