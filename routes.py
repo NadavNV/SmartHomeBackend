@@ -20,7 +20,7 @@ from monitoring.metrics import (
 )
 
 # MQTT
-from services.mqtt import publish_mqtt, mqtt, update_device
+from services.mqtt import publish_mqtt, get_mqtt, update_device, MQTTNotInitializedError
 
 
 def setup_routes(app) -> None:
@@ -224,7 +224,7 @@ def setup_routes(app) -> None:
             app.logger.debug("MongoDB ping successful.")
 
             app.logger.debug("Checking MQTT connection . . .")
-            if not mqtt.is_connected():
+            if not get_mqtt().is_connected():
                 app.logger.debug("MQTT not connected")
                 return jsonify({"Status": "Not ready"}), 500
             app.logger.debug("MQTT connected.")
@@ -239,7 +239,8 @@ def setup_routes(app) -> None:
                 app.logger.debug("Redis ping failed.")
                 return jsonify({"Status": "Not ready"}), 500
 
-        except (ConnectionFailure, OperationFailure, ConnectionError, DatabaseNotInitializedError):
+        except (ConnectionFailure, OperationFailure, ConnectionError, DatabaseNotInitializedError,
+                MQTTNotInitializedError):
             app.logger.exception("Dependency check failed.")
             return jsonify({"Status": "Not ready"}), 500
 
