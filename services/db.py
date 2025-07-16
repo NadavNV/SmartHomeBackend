@@ -8,10 +8,11 @@ from time import sleep
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from pymongo.synchronous.collection import Collection
-from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure
+from pymongo.errors import ConnectionFailure, ConfigurationError, OperationFailure, InvalidURI
+from redis.exceptions import AuthenticationError
 from dotenv import load_dotenv
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 
 class DatabaseNotInitializedError(Exception):
@@ -92,6 +93,39 @@ def retry_function(
             sleep(delay)
 
 
+def inject_credentials_into_uri(uri: str, username: str, password: str) -> str:
+    """
+    Injects credentials into a MongoDB connection string if they are missing.
+
+    :param uri: The connection string
+    :type uri: str
+    :param username: The MongoDB username
+    :type username: str
+    :param password: The MongoDB password
+    :type password: str
+    :return: The corrected URI
+    :rtype: str
+    """
+    parsed = urlparse(uri)
+
+    if parsed.username or parsed.password:
+        return uri  # Already has credentials
+
+    netloc = f"{username}:{password}@{parsed.hostname}"
+    if parsed.port:
+        netloc += f":{parsed.port}"
+
+    new_uri = urlunparse((
+        parsed.scheme,
+        netloc,
+        parsed.path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment
+    ))
+    return new_uri
+
+
 def init_db() -> None:
     """
     Initialize the Mongo database and connect to Redis.
@@ -102,16 +136,12 @@ def init_db() -> None:
     logger.info("Attempting to connect to Mongo database...")
 
     try:
-        # Parse the URI to see if credentials are already included
-        parsed = urlparse(MONGO_DB_CONNECTION_STRING)
-
-        # If the netloc does NOT contain username:password, add them via MongoClient params
-        if parsed.username is None and parsed.password is None and MONGO_USER and MONGO_PASS:
-            mongo_client = MongoClient(MONGO_DB_CONNECTION_STRING, username=MONGO_USER, password=MONGO_PASS,
-                                       server_api=ServerApi('1'))
+        if MONGO_USER is not None and MONGO_PASS is not None:
+            uri = inject_credentials_into_uri(MONGO_DB_CONNECTION_STRING, MONGO_USER, MONGO_PASS)
         else:
-            mongo_client = MongoClient(MONGO_DB_CONNECTION_STRING, server_api=ServerApi('1'))
-    except ConfigurationError:
+            uri = MONGO_DB_CONNECTION_STRING
+        mongo_client = MongoClient(uri, server_api=ServerApi('1'))
+    except (ConfigurationError, InvalidURI):
         logger.exception("Failed to connect to database. Shutting down.")
         sys.exit(1)
 
@@ -133,7 +163,7 @@ def init_db() -> None:
         logger.exception("Failed to initialize Redis client. Shutting down.")
         sys.exit(1)
 
-    retry_function(redis_client.ping, redis.ConnectionError)
+    retry_function(redis_client.ping, (redis.ConnectionError, AuthenticationError))
 
     logger.info("Success.")
 
