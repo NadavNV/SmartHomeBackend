@@ -247,6 +247,66 @@ class TestMQTTCallbacks(TestCase):
         self.mock_logger.info.assert_has_calls(calls)
         self.assertEqual(device, self.mock_collection.find_one({"id": device["id"]}, {"_id": 0}))
 
+    def test_on_message_invalid_update_missing_id(self):
+        props = Properties(PacketTypes.PUBLISH)
+        props.UserProperty = [('sender_id', CLIENT_ID + "2"), ('sender_group', 'simulator')]
+
+        fake_msg = MagicMock()
+        device_id = self.valid_water_heater
+        fake_msg.payload = json.dumps({"parameters": {"temperature": (MIN_WATER_TEMP + MAX_WATER_TEMP) / 2}}).encode()
+        fake_msg.topic = VALID_TOPIC + f"{device_id}/update"
+        fake_msg.properties = props
+
+        on_message(None, None, fake_msg)
+        self.mock_logger.info.assert_called_with(f"MQTT Message Received on {fake_msg.topic}")
+        self.mock_logger.error.assert_called_with(f"Device ID {device_id} not found")
+
+    def test_on_message_invalid_update_bad_data(self):
+        self.mock_collection.insert_one(deepcopy(self.valid_water_heater))
+        props = Properties(PacketTypes.PUBLISH)
+        props.UserProperty = [('sender_id', CLIENT_ID + "2"), ('sender_group', 'simulator')]
+
+        fake_msg = MagicMock()
+        fake_msg.payload = json.dumps({"parameters": {"target_temperature": MAX_WATER_TEMP + 1}}).encode()
+        fake_msg.topic = VALID_TOPIC + f"{self.valid_water_heater["id"]}/update"
+        fake_msg.properties = props
+
+        on_message(None, None, fake_msg)
+        self.mock_logger.info.assert_called_with(f"MQTT Message Received on {fake_msg.topic}")
+        reasons = [f"'target_temperature' must be between {MIN_WATER_TEMP} and"
+                   f" {MAX_WATER_TEMP}, got {MAX_WATER_TEMP + 1} instead."]
+        self.mock_logger.error.assert_called_with(f"Validation failed, reasons: {reasons}")
+
+    def test_on_message_valid_delete(self):
+        self.mock_collection.insert_one(deepcopy(self.valid_water_heater))
+        props = Properties(PacketTypes.PUBLISH)
+        props.UserProperty = [('sender_id', CLIENT_ID + "2"), ('sender_group', 'simulator')]
+
+        fake_msg = MagicMock()
+        device_id = self.valid_water_heater["id"]
+        fake_msg.payload = json.dumps({}).encode()
+        fake_msg.topic = VALID_TOPIC + f"{device_id}/delete"
+        fake_msg.properties = props
+
+        on_message(None, None, fake_msg)
+        calls = [call(f"MQTT Message Received on {fake_msg.topic}"), call("Device deleted successfully")]
+        self.mock_logger.info.assert_has_calls(calls)
+        self.assertEqual(None, self.mock_collection.find_one({"id": device_id}))
+
+    def test_on_message_invalid_delete_missing_id(self):
+        props = Properties(PacketTypes.PUBLISH)
+        props.UserProperty = [('sender_id', CLIENT_ID + "2"), ('sender_group', 'simulator')]
+
+        fake_msg = MagicMock()
+        device_id = self.valid_water_heater["id"]
+        fake_msg.payload = json.dumps({}).encode()
+        fake_msg.topic = VALID_TOPIC + f"{device_id}/delete"
+        fake_msg.properties = props
+
+        on_message(None, None, fake_msg)
+        self.mock_logger.info.assert_called_with(f"MQTT Message Received on {fake_msg.topic}")
+        self.mock_logger.error.assert_called_with(f"Device ID {device_id} not found")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,22 +11,6 @@ from monitoring.metrics import update_device_status, update_device_metrics
 from services.db import get_devices_collection, id_exists
 from validation.validators import validate_device_data
 
-logging.basicConfig(
-    format="[%(asctime)s] %(levelname)s in %(module)s: %(message)s",
-    handlers=[
-        # Prints to sys.stderr
-        logging.StreamHandler(),
-        # Writes to a log file which rotates every 1mb, or gets overwritten when the app is restarted
-        logging.handlers.RotatingFileHandler(
-            filename="backend.log",
-            mode='w',
-            maxBytes=1024 * 1024,
-            backupCount=3
-        )
-    ],
-    level=logging.INFO,
-)
-
 logger = logging.getLogger("smart-home.services.mqtt")
 
 
