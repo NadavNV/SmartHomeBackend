@@ -232,8 +232,10 @@ def setup_routes(app) -> None:
             app.logger.debug("Pinging Redis . . .")
             if get_redis().ping():
                 app.logger.debug("Redis ping successful.")
+                app.logger.info("Ready")
                 return jsonify({"Status": "Ready"})
             else:
+                app.logger.error("Not ready")
                 app.logger.debug("Redis ping failed.")
                 return jsonify({"Status": "Not ready"}), 500
 
