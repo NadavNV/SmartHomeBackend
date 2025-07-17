@@ -72,11 +72,11 @@ messages from the different devices to update and maintain a MongoDB database as
     - Run `pip install -r requirements.txt`.
     - Run the flask app. On Linux:
         ```bash
-        nohup gunicorn --factory -w 1 -b 127.0.0.1:8000 main:create_app > gunicorn.log 2>&1 &
+        nohup gunicorn -w 1 -b 127.0.0.1:8000 main:create_app > gunicorn.log 2>&1 &
         ```
       And on Windows:
         ```powershell
-        Start-Process gunicorn -ArgumentList "--factory", "-w", "1", "-b", "127.0.0.1:8000", "main:create_app"
+        Start-Process gunicorn -ArgumentList "-w", "1", "-b", "127.0.0.1:8000", "main:create_app"
         ```
     - Make sure your `nginx.conf` is configured to listen on port `5200` and proxy requests to `127.0.0.1:8000`.
     - Start nginx. On Linux, if you have a custom `nginx.conf`file in your project folder:
@@ -101,7 +101,9 @@ messages from the different devices to update and maintain a MongoDB database as
       git clone https://github.com/NadavNV/SmartHomeBackend.git
       cd SmartHomeBackend
       ```
-    - Make sure your `nginx.conf` is configured to listen on port `5200` and proxy requests to the flask container.
+    - Make sure your `nginx.conf` is configured to listen on port `5200` and proxy requests to the flask container. You
+      can create an environment variable named `FLASK_BACKEND_HOST` with the name of the flask container and pass it
+      to the nginx container, and it will be handled automatically.
     - This app requires two images, one for the app itself and one for the nginx reverse-proxy. Run:
       ```bash
       docker build -f flask.Dockerfile -t <name for the Flask image> .
@@ -115,6 +117,7 @@ messages from the different devices to update and maintain a MongoDB database as
       ```bash
       docker run -d \
         -p 5200:5200 \
+        -e FLASK_BACKEND_HOST=$FLASK_BACKEND_HOST
         --network smart-home-net \
         --name <name for the container \
         <name of the nginx image>
