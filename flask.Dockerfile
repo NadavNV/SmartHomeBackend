@@ -12,6 +12,9 @@ COPY config/ config/
 COPY services/ services/
 COPY test/ test/
 
+# Ensure all packages are visible to python
+ENV PYTHONPATH="${PYTHONPATH}:/app"
+
 EXPOSE 8000
 
 CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:8000", "main:create_app()"]
