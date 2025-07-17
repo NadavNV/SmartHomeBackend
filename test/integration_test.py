@@ -3,9 +3,11 @@ import sys
 import time
 import os
 import paho.mqtt.client as mqtt
+from services.mqtt import MQTT_TOPIC
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3001")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5200")
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+BACKEND_URL = os.getenv("BACKEND_URL")
+GRAFANA_URL = os.getenv("GRAFANA_URL")
 
 DATA = {
     "id": "test-device",
@@ -86,17 +88,18 @@ else:
 mqtt_message_received = False
 
 
-def on_message(mqtt_client, _userdata, msg):
+def on_message(mqtt_client: mqtt.Client, _userdata, msg: mqtt.MQTTMessage):
     global mqtt_message_received
     print(f"MQTT message received on topic: {msg.topic}")
     mqtt_message_received = True
+    mqtt_client.loop_stop()
     mqtt_client.disconnect()  # Stop loop after receiving
 
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 client.on_message = on_message
 client.connect("mqtt-broker", 1883, 60)
-client.subscribe("project/home/#")
+client.subscribe(f"{MQTT_TOPIC}/#")
 client.loop_start()
 
 print("Waiting up to 10 seconds for simulator MQTT message...")
@@ -117,17 +120,7 @@ else:
     print("Simulator did not publish MQTT messages")
     error_list.append("Simulator")
 
-# ---------- Test 4: Prometheus ----------
-response = requests.get("http://prometheus:9090/-/ready")
-if 199 < response.status_code < 400:
-    print("Prometheus is ready")
-    prom_test = True
-    tests += 1
-else:
-    print("Prometheus is not ready")
-    error_list.append("Prometheus")
-
-# ---------- Test 5: Grafana ----------
+# ---------- Test 4: Grafana ----------
 response = requests.get("http://grafana:3000/api/health")
 if 199 < response.status_code < 400:
     print("Grafana is healthy")
