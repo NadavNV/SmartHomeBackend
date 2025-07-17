@@ -2,7 +2,7 @@ import requests
 import sys
 import time
 import os
-import paho.mqtt.client as mqtt
+import paho.mqtt.client as paho
 from services.mqtt import MQTT_TOPIC
 
 FRONTEND_URL = os.getenv("FRONTEND_URL")
@@ -29,7 +29,7 @@ simulator_test = False
 prom_test = False
 grafana_test = False
 tests = 0
-total_test_num = 5
+total_test_num = 4
 
 
 def run_api_test(backend_url, data):
@@ -88,21 +88,20 @@ else:
 mqtt_message_received = False
 
 
-def on_message(mqtt_client: mqtt.Client, _userdata, msg: mqtt.MQTTMessage):
+def on_message(mqtt_client: paho.Client, _userdata, msg: paho.MQTTMessage):
     global mqtt_message_received
     print(f"MQTT message received on topic: {msg.topic}")
     mqtt_message_received = True
-    mqtt_client.loop_stop()
     mqtt_client.disconnect()  # Stop loop after receiving
 
 
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+client = paho.Client(paho.CallbackAPIVersion.VERSION2, protocol=paho.MQTTv5)
 client.on_message = on_message
 client.connect("mqtt-broker", 1883, 60)
 client.subscribe(f"{MQTT_TOPIC}/#")
 client.loop_start()
 
-print("Waiting up to 10 seconds for simulator MQTT message...")
+print("Waiting up to 30 seconds for simulator MQTT message...")
 
 # Wait up to 30 seconds for message
 for _ in range(30):
@@ -121,7 +120,7 @@ else:
     error_list.append("Simulator")
 
 # ---------- Test 4: Grafana ----------
-response = requests.get("http://grafana:3000/api/health")
+response = requests.get(f"{GRAFANA_URL}/api/health")
 if 199 < response.status_code < 400:
     print("Grafana is healthy")
     grafana_test = True
@@ -132,7 +131,7 @@ else:
 
 # ---------- Final result ----------
 print(f"{tests}/{total_test_num} tests have gone through successfully")
-if tests == total_test_num:
+if not error_list:
     sys.exit(0)
 else:
     print("The following tests have failed")
