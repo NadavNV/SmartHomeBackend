@@ -1,5 +1,5 @@
 from config import env  # noqa: F401  # load_dotenv side effect
-import logging.handlers
+import logging
 import os
 import json
 import paho.mqtt.client as paho
