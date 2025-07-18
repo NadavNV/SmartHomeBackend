@@ -6,9 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY *.py .
-COPY validation/ validation/
 COPY monitoring/ monitoring/
-COPY config/ config/
 COPY services/ services/
 COPY test/ test/
 

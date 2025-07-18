@@ -1,4 +1,3 @@
-from config import env  # noqa: F401  # load_dotenv side effect
 from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 import logging.handlers

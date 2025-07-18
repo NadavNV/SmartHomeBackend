@@ -1,4 +1,3 @@
-from config import env  # noqa: F401  # load_dotenv side effect
 import logging
 import os
 import json
@@ -26,6 +25,7 @@ MQTT_TOPIC = os.getenv("MQTT_TOPIC", "nadavnv-smart-home/devices")
 CLIENT_ID = f"flask-backend-{os.getenv('HOSTNAME')}"
 
 mqtt: paho.Client | None = None
+message_queue = []
 
 
 def on_connect(client: paho.Client, _userdata, _connect_flags, reason_code, _properties=None) -> None:
@@ -45,11 +45,18 @@ def on_connect(client: paho.Client, _userdata, _connect_flags, reason_code, _pro
     if reason_code == 0:
         logger.info("Connected successfully")
         client.subscribe(f"$share/backend/{MQTT_TOPIC}/#")
+        if message_queue:
+            unsent_msgs = []
+            for msg in message_queue:
+                info = client.publish(*msg["args"], **msg["kwargs"])
+                if info.rc != 0:
+                    unsent_msgs.append(msg)
+            message_queue[:] = unsent_msgs
     else:
         logger.error(f"Connection failed with code {reason_code}")
 
 
-def on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
+def on_disconnect(_client, _userdata, _disconnect_flags, reason_code: paho.ReasonCode, _properties=None) -> None:
     """
     Function to run after the MQTT client disconnects.
 
@@ -57,6 +64,7 @@ def on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _propertie
     :param _userdata: Unused by this function.
     :param _disconnect_flags: Unused by this function.
     :param reason_code: The disconnection reason code possibly received from the broker.
+    :type reason_code: paho.ReasonCode
     :param _properties: Unused by this function.
     :return: None
     :rtype: None
@@ -195,7 +203,24 @@ def publish_mqtt(payload: dict[str, Any], device_id: str, method: str) -> None:
     payload = json.dumps(payload)
     properties = Properties(PacketTypes.PUBLISH)
     properties.UserProperty = [("sender_id", CLIENT_ID), ("sender_group", "backend")]
-    mqtt.publish(topic, payload.encode("utf-8"), qos=2, properties=properties)
+    message = {
+        "args": [topic, payload.encode("utf-8")],
+        "kwargs": {
+            "qos": 2,
+            "properties": properties,
+        },
+    }
+    try:
+        info = get_mqtt().publish(*message["args"], **message["kwargs"])
+        if info.rc != 0:
+            if info.rc == 4:  # MQTT_ERR_NO_CONN
+                logger.error("Trying to publish on disconnected client.")
+            else:
+                logger.error("Error trying to publish.")
+            message_queue.append(message)
+    except MQTTNotInitializedError:
+        logger.error("Trying to publish with uninitialized MQTT")
+        message_queue.append(message)
 
 
 def init_mqtt() -> None:
