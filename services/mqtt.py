@@ -216,7 +216,7 @@ def publish_mqtt(payload: dict[str, Any], device_id: str, method: str) -> None:
             if info.rc == 4:  # MQTT_ERR_NO_CONN
                 logger.error("Trying to publish on disconnected client.")
             else:
-                logger.error("Error trying to publish.")
+                logger.error(f"Error trying to publish, reason code: {info.rc}.")
             message_queue.append(message)
     except MQTTNotInitializedError:
         logger.error("Trying to publish with uninitialized MQTT")

@@ -1,6 +1,8 @@
 import os
 import unittest
 import random
+from collections import namedtuple
+
 import mongomock
 import fakeredis
 import json
@@ -10,6 +12,7 @@ from paho.mqtt.properties import Properties
 from paho.mqtt.packettypes import PacketTypes
 from copy import deepcopy
 
+import services.mqtt
 from services.mqtt import on_connect, on_disconnect, on_message, update_device, publish_mqtt
 from validation.validators import (
     MIN_WATER_TEMP, MAX_WATER_TEMP,
@@ -19,6 +22,28 @@ VALID_TOPIC = f"nadavnv-smart-home/devices/"
 CLIENT_ID = f"flask-backend-{os.getenv('HOSTNAME')}"
 
 
+class MessageQueueMatcher:
+
+    def __init__(self, lst):
+        self.list = lst
+
+    def __eq__(self, other):
+        if len(self.list) != len(other):
+            return False
+        for i in range(len(self.list)):
+            try:
+                if not (
+                        self.list[i]["args"] == other[i]["args"] and
+                        self.list[i]["kwargs"]["qos"] == other[i]["kwargs"]["qos"] and
+                        dict(self.list[i]["kwargs"]["properties"].UserProperty) == dict(other[i]["kwargs"][
+                                                                                            "properties"].UserProperty)
+                ):
+                    return False
+            except KeyError:
+                return False
+        return True
+
+
 def fake_mqtt_client(*_args, **_kwargs):
     mock_client = MagicMock()
     mock_client.connect_async.return_value = None
@@ -26,7 +51,8 @@ def fake_mqtt_client(*_args, **_kwargs):
     mock_client.loop_start.return_value = None
     mock_client.loop_stop.return_value = None
     mock_client.subscribe.return_value = 0
-    mock_client.publish.return_value = None
+    Info = namedtuple("Info", "rc mid")
+    mock_client.publish.side_effect = [Info(1, None), Info(1, None), Info(0, None)]
     return mock_client
 
 
@@ -50,6 +76,7 @@ class TestMQTTCallbacks(TestCase):
         self.mock_mqtt_client = fake_mqtt_client()
 
         self.mark_device_read_patcher = patch('routes.mark_device_read', MagicMock())
+        self.get_mqtt_patch = patch('services.mqtt.get_mqtt', return_value=self.mock_mqtt_client)
         self.mongo_client_constructor_patch = patch('services.db.MongoClient', return_value=self.mock_mongo_client)
         self.redis_constructor_patch = patch('services.db.redis.Redis', return_value=self.mock_redis)
         self.routes_get_devices_patch = patch('routes.get_devices_collection', return_value=self.mock_collection)
@@ -69,6 +96,7 @@ class TestMQTTCallbacks(TestCase):
         self.mqtt_get_devices_patch.start()
         self.get_redis_patch.start()
         self.get_mongo_client_patch.start()
+        self.get_mqtt_patch.start()
         self.routes_id_exists_patch.start()
         self.mqtt_id_exists_patch.start()
 
@@ -101,6 +129,7 @@ class TestMQTTCallbacks(TestCase):
         self.mqtt_get_devices_patch.stop()
         self.get_redis_patch.stop()
         self.get_mongo_client_patch.stop()
+        self.get_mqtt_patch.stop()
         self.routes_id_exists_patch.stop()
         self.mqtt_id_exists_patch.stop()
 
@@ -306,6 +335,25 @@ class TestMQTTCallbacks(TestCase):
         on_message(None, None, fake_msg)
         self.mock_logger.info.assert_called_with(f"MQTT Message Received on {fake_msg.topic}")
         self.mock_logger.error.assert_called_with(f"Device ID {device_id} not found")
+
+    def test_publish_failure(self):
+        payload = {"key": "value"}
+        publish_mqtt(payload=payload, device_id="steve", method="update")
+        self.mock_logger.error.assert_called_with("Error trying to publish, reason code: 1.")
+        props = Properties(PacketTypes.PUBLISH)
+        props.UserProperty = [('sender_id', CLIENT_ID), ('sender_group', 'backend')]
+        msg = {
+            "args": [VALID_TOPIC + "steve/update", json.dumps(payload).encode("utf-8")],
+            "kwargs": {
+                "qos": 2,
+                "properties": props,
+            }
+        }
+        self.assertEqual(MessageQueueMatcher([msg]), services.mqtt.message_queue)
+        on_connect(self.mock_mqtt_client, None, None, 0, None)
+        self.assertEqual(MessageQueueMatcher([msg]), services.mqtt.message_queue)
+        on_connect(self.mock_mqtt_client, None, None, 0, None)
+        self.assertEqual(services.mqtt.message_queue, [])
 
 
 if __name__ == "__main__":

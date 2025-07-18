@@ -18,7 +18,10 @@ def fake_mqtt_client(*_args, **_kwargs):
     mock_client.loop_start.return_value = None
     mock_client.loop_stop.return_value = None
     mock_client.subscribe.return_value = 0
-    mock_client.publish.return_value = None
+    msg_info = MagicMock()
+    msg_info.rc = 0
+    mock_client.publish.return_value = msg_info
+
     return mock_client
 
 
