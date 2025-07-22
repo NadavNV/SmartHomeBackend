@@ -244,7 +244,7 @@ def setup_routes(app) -> None:
             return jsonify({"Status": "Not ready"}), 500
 
     @app.after_request
-    def after_request_combined(response):
+    def after_request(response):
         """
         Function to run just before the HTTP response is sent. Used to calculate HTTP metrics
         and to add response headers.
@@ -253,13 +253,16 @@ def setup_routes(app) -> None:
         :return: The modified HTTP response.
         """
         # Prometheus tracking
+        method = request.method
+        endpoint = request.path
+        status_code = str(response.status_code)
         if hasattr(request, 'start_time'):
             duration = time.time() - request.start_time
-            request_count.labels(request.method, request.path).inc()
-            request_latency.labels(request.path).observe(duration)
+            request_count.labels(method=method, endpoint=endpoint, status_code=status_code).inc()
+            request_latency.labels(endpoint).observe(duration)
 
         # CORS headers
-        if request.method == 'OPTIONS':
+        if method == 'OPTIONS':
             response.headers['Allow'] = '*'
             response.headers['Access-Control-Allow-Methods'] = 'HEAD, DELETE, POST, GET, OPTIONS, PUT, PATCH'
         response.headers['Access-Control-Allow-Headers'] = '*'

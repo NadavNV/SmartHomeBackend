@@ -17,7 +17,7 @@ logger = logging.getLogger("smart_home.monitoring.metrics")
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-svc.smart-home.svc.cluster.local:9090")
 # Prometheus metrics
 # HTTP request metrics
-request_count = Counter('request_count', 'Total Request Count', ['method', 'endpoint'])
+request_count = Counter('request_count', 'Total Request Count', ['status_code', 'method', 'endpoint'])
 request_latency = Histogram('request_latency_seconds', 'Request latency', ['endpoint'])
 
 # Device metrics
