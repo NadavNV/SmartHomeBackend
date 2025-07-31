@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch, call
 import mongomock
 import fakeredis
 from copy import deepcopy
+from flask_jwt_extended import create_access_token
 from main import create_app
 
 from validation.validators import (
@@ -74,6 +75,11 @@ class FlaskTest(TestCase):
         self.app = create_app()
         self.app.testing = True
         self.app.logger = self.mock_logger
+        self.ctx = self.app.app_context()
+        self.ctx.push()
+        self.admin_token = create_access_token(
+            identity="admin_user", additional_claims={"role": "admin"}
+        )
         self.client = self.app.test_client()
         self.valid_water_heater = {
             "id": "main-water-heater",
@@ -92,6 +98,7 @@ class FlaskTest(TestCase):
         }
 
     def tearDown(self):
+        self.ctx.pop()
         self.validators_logger_patcher.stop()
         self.metrics_logger_patcher.stop()
         self.mqtt_get_devices_patch.stop()
@@ -219,7 +226,10 @@ class FlaskTest(TestCase):
     def test_delete_device_valid(self):
         device = deepcopy(self.valid_water_heater)
         self.mock_collection.insert_one(deepcopy(device))
-        res = self.client.delete('/api/devices/main-water-heater')
+        res = self.client.delete(
+            '/api/devices/main-water-heater',
+            headers={"Authorization": f"Bearer {self.admin_token}"},
+        )
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.content_type, 'application/json')
         self.assertEqual(res.get_json(), {'output': "Device was deleted from the database"})
@@ -227,10 +237,27 @@ class FlaskTest(TestCase):
         self.mock_mqtt_client.publish.assert_called()
 
     def test_delete_device_invalid(self):
-        res = self.client.delete('/api/devices/main-water-heater')
+        res = self.client.delete(
+            '/api/devices/main-water-heater',
+            headers={"Authorization": f"Bearer {self.admin_token}"},
+        )
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.content_type, 'application/json')
         self.assertEqual(res.get_json(), {'error': "ID main-water-heater not found"})
+
+    def test_delete_device_forbidden_for_non_admin(self):
+        user_token = create_access_token(
+            identity="test_user",
+            additional_claims={"role": "user"}
+        )
+
+        res = self.client.delete(
+            '/api/devices/main-water-heater',
+            headers={"Authorization": f"Bearer {user_token}"}
+        )
+
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.get_json(), {"error": "Admins only"})
 
     def test_put_device_valid(self):
         device = deepcopy(self.valid_water_heater)
