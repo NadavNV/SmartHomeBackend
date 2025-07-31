@@ -1,4 +1,7 @@
+import os
+
 from flask import Flask
+from flask_jwt_extended import JWTManager
 from werkzeug.middleware.proxy_fix import ProxyFix
 import logging.handlers
 from routes import setup_routes
@@ -38,6 +41,8 @@ def create_app() -> Flask:
     """
     app = Flask(__name__)
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+    app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
+    JWTManager(app)
     app.logger.propagate = False
     init_db()
     init_mqtt()

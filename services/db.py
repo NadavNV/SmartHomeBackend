@@ -42,6 +42,7 @@ MONGO_PASS = os.getenv("MONGO_PASS")
 
 mongo_client: MongoClient | None = None
 devices_collection: Collection | None = None
+users_collection: Collection | None = None
 redis_client: redis.Redis | None = None
 
 
@@ -131,7 +132,7 @@ def init_db() -> None:
     :return: None
     :rtype: None
     """
-    global mongo_client, devices_collection, redis_client
+    global mongo_client, devices_collection, users_collection, redis_client
     logger.info("Attempting to connect to Mongo database...")
 
     try:
@@ -149,6 +150,7 @@ def init_db() -> None:
     logger.info("Successfully connected to Mongo database. Attempting to connect to Redis database...")
     db = mongo_client["smart-home-devices"]
     devices_collection = db["devices"]
+    users_collection = db["users"]
 
     try:
         redis_client = redis.Redis(
@@ -220,3 +222,17 @@ def get_devices_collection() -> Collection:
     if devices_collection is None:
         raise DatabaseNotInitializedError("Mongo client is not initialized.")
     return devices_collection
+
+
+def get_users_collection() -> Collection:
+    """
+    Returns the collection of users if the Mongo client was initialized.
+
+    :return: Collection of users if the Mongo client was initialized.
+    :rtype: Collection
+
+    :raises: DatabaseNotInitializedException if Mongo was not initialized.
+    """
+    if users_collection is None:
+        raise DatabaseNotInitializedError("Mongo client is not initialized.")
+    return users_collection

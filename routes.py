@@ -1,9 +1,12 @@
 from flask import jsonify, request, Response
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt
 import time
 from redis.exceptions import ConnectionError
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # Databases
-from services.db import get_redis, get_mongo_client, get_devices_collection, id_exists, DatabaseNotInitializedError
+from services.db import get_redis, get_mongo_client, get_devices_collection, get_users_collection, id_exists, \
+    DatabaseNotInitializedError
 from pymongo.errors import ConnectionFailure, OperationFailure
 
 # Validation
@@ -51,6 +54,59 @@ def setup_routes(app) -> None:
         :rtype: Response
         """
         return Response(generate_latest(), mimetype="text/plain"), 200
+
+    @app.post("/register")
+    def register_user() -> tuple[Response, int]:
+        """
+        Registers a new non-admin user with this database. Must include username and password in the request json.
+
+        Returns JWT access token on success and {'error': <reasons>} on failure.
+
+        :return: Response
+        :rtype: tuple[Response, int]
+        """
+        if not request.is_json:
+            return jsonify({"error": "Missing or invalid JSON in request"}), 400
+        data = request.json
+        if "username" not in data:
+            return jsonify({"error": "Request must include a username field"}), 400
+        if "password" not in data:
+            return jsonify({"error": "Request must include a password field"}), 400
+        user = get_users_collection().find_one({"username": data['username']})
+        if user is not None:
+            return jsonify({"error": "User already exists"}), 409
+
+        hashed_pw = generate_password_hash(data['password'])
+        get_users_collection().insert_one({
+            "username": data['username'],
+            "password_hash": hashed_pw,
+            "role": "user"
+        })
+        token = create_access_token(identity=data['username'], additional_claims={"role": "user"})
+        return jsonify(access_token=token), 201
+
+    @app.post('/login')
+    def login() -> tuple[Response, int]:
+        """
+        Logs into the website with the username and password given in the request json.
+
+        Returns JWT access token on success and {'error': <reasons>} on failure.
+        :return: Response
+        :rtype: tuple[Response, int]
+        """
+        if not request.is_json:
+            return jsonify({"error": "Missing or invalid JSON in request"}), 400
+        data = request.json
+        if "username" not in data:
+            return jsonify({"error": "Request must include a username field"}), 400
+        if "password" not in data:
+            return jsonify({"error": "Request must include a password field"}), 400
+        user = get_users_collection().find_one({"username": data['username']})
+        if not user or not check_password_hash(user['password_hash'], data['password']):
+            return jsonify({"error": "Invalid credentials"}), 401
+
+        token = create_access_token(identity=user['username'], additional_claims={"role": user['role']})
+        return jsonify(access_token=token), 200
 
     @app.get("/api/ids")
     def get_device_ids() -> tuple[Response, int]:
@@ -103,6 +159,8 @@ def setup_routes(app) -> None:
         :return: Response.
         :rtype: tuple[Response, int]
         """
+        if not request.is_json:
+            return jsonify({"error": "Missing or invalid JSON in request"}), 400
         new_device = request.json
         success, reasons = validate_device_data(new_device, new_device=True)
         if success:
@@ -121,6 +179,7 @@ def setup_routes(app) -> None:
             return jsonify({'error': reasons}), 400
 
     @app.delete("/api/devices/<device_id>")
+    @jwt_required()
     def delete_device(device_id: str) -> tuple[Response, int]:
         """
         Deletes a device from the Mongo database.
@@ -130,6 +189,10 @@ def setup_routes(app) -> None:
         :return: Response.
         :rtype: tuple[Response, int]
         """
+        role = get_jwt()["role"]
+        if role != 'admin':
+            return jsonify({"error": "Admins only"}), 403
+
         if id_exists(device_id):
             get_redis().srem("seen_devices", device_id)  # Allows adding a new device with old id
             get_devices_collection().delete_one({"id": device_id})
@@ -154,6 +217,8 @@ def setup_routes(app) -> None:
         :return: Response.
         :rtype: tuple[Response, int]
         """
+        if not request.is_json:
+            return jsonify({"error": "Missing or invalid JSON in request"}), 400
         updated_device = request.json
         id_to_update = updated_device.get("id", None)
         if id_to_update is not None and id_to_update != device_id:
